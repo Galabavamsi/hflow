@@ -1,0 +1,118 @@
+{
+  "schema_version": 2,
+  "dataset": {
+    "repo_id": "builddotai/Egocentric-10K",
+    "revision": "3e5f87c88c54ce8343865d8e2a8c171f18385a05",
+    "license": "apache-2.0"
+  },
+  "archive": {
+    "path": "factory_051/workers/worker_001/factory051_worker001_part00.tar",
+    "sha256": "93486bd8de40a431e26f255058c89a542e04dfaa1bbb7937c7e47ec52f3b2190"
+  },
+  "sources": [
+    {
+      "member": "factory051_worker001_00000.mp4",
+      "sha256": "f27e6b8ef4534e7e6b5320ea833ccaf58680aaf4187a0c2afaf3e2c1c1e36242",
+      "duration_s": 179.733333,
+      "task": "workcell_navigation"
+    },
+    {
+      "member": "factory051_worker001_00001.mp4",
+      "sha256": "46885932f84565080da5c0b272a0d2e7be94905869b2e99ca574c96091ea45a2",
+      "duration_s": 179.733333,
+      "task": "machine_interaction"
+    },
+    {
+      "member": "factory051_worker001_00002.mp4",
+      "sha256": "03e0b7ad6cfb690023746417d0695fcba3d953dac034860b7283ff37aebc0a86",
+      "duration_s": 179.833333,
+      "task": "workcell_navigation"
+    },
+    {
+      "member": "factory051_worker001_00003.mp4",
+      "sha256": "bcb83ed6dc012426e3d360ee545ec87dcaf69173a70d76f740bda3e683e30a30",
+      "duration_s": 179.966667,
+      "task": "material_handling"
+    },
+    {
+      "member": "factory051_worker001_00004.mp4",
+      "sha256": "701ce00544d4d19dbdfb4922d817b4cfc3fb5cc3fca38394ca7c93a86b18860f",
+      "duration_s": 179.933333,
+      "task": "material_handling"
+    },
+    {
+      "member": "factory051_worker001_00005.mp4",
+      "sha256": "a6b1a95af6b60c4eaba682feb59612f7f36717f0f13eb32591803b9127b52b0e",
+      "duration_s": 180.0,
+      "task": "workcell_navigation"
+    },
+    {
+      "member": "factory051_worker001_00006.mp4",
+      "sha256": "88a4c4f33bbb179c1d34d31d2db021f4a1dbd8107ac22089aace46211fae7c2b",
+      "duration_s": 179.766667,
+      "task": "component_sorting"
+    },
+    {
+      "member": "factory051_worker001_00007.mp4",
+      "sha256": "875fd75fce17990ea6633ebb15e15fcb47ed0764bef557c77bae58bdf7b3b8fe",
+      "duration_s": 179.833333,
+      "task": "component_sorting"
+    },
+    {
+      "member": "factory051_worker001_00008.mp4",
+      "sha256": "16d9883d3bb2f696410cfdee93e1fc7dfbfd5fe40ef664411a9afce0126664f5",
+      "duration_s": 179.666667,
+      "task": "component_sorting"
+    },
+    {
+      "member": "factory051_worker001_00009.mp4",
+      "sha256": "32d2019160dfd5884410c83209d12733b3a8812f2c161af81517cb60d5dd3f05",
+      "duration_s": 179.966667,
+      "task": "tray_handling"
+    },
+    {
+      "member": "factory051_worker001_00010.mp4",
+      "sha256": "614a4f10bceb0eb1ee4a0e7f7db473ab84eb21f083f86b3cf1cf69b9acd64bec",
+      "duration_s": 180.033333,
+      "task": "tool_setup"
+    }
+  ],
+  "episode_plan": {
+    "total_episodes": 96,
+    "duration_s": 20.0,
+    "first_source_start_s": 4.0,
+    "source_stride_s": 19.0,
+    "faults": [
+      {
+        "episode_number": 14,
+        "fault": "blackout",
+        "fault_segment_s": [7.0, 10.0]
+      },
+      {
+        "episode_number": 29,
+        "fault": "blackout",
+        "fault_segment_s": [7.0, 10.0]
+      },
+      {
+        "episode_number": 44,
+        "fault": "blackout",
+        "fault_segment_s": [7.0, 10.0]
+      },
+      {
+        "episode_number": 59,
+        "fault": "freeze",
+        "fault_segment_s": [7.0, 11.0]
+      },
+      {
+        "episode_number": 74,
+        "fault": "freeze",
+        "fault_segment_s": [7.0, 11.0]
+      },
+      {
+        "episode_number": 89,
+        "fault": "freeze",
+        "fault_segment_s": [7.0, 11.0]
+      }
+    ]
+  }
+}

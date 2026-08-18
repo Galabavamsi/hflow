@@ -1,0 +1,39 @@
+name: Feature request
+description: Propose a concrete user outcome or compatibility improvement.
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow or user outcome is currently difficult or impossible?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful behavior, including an example API or command when possible.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or existing tools have you tried?
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and data-format impact
+      description: Note any effect on MCAP layout, metadata, catalogs, Airflow bundles, or existing pipelines.
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: Contribution
+      description: Would you be interested in implementing this after scope is agreed?
+      options:
+        - "Yes"
+        - "Maybe"
+        - "No"
+    validations:
+      required: true

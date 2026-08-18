@@ -1,0 +1,96 @@
+[project]
+name = "hflow"
+version = "0.0.0"
+description = "Open-source pipeline for processing, quality-checking, enriching, and curating physical-AI episode data"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Hebbian Robotics" }]
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb>=1.5.5",
+    "foxglove-schemas-protobuf>=0.4.0",
+    "mcap>=1.4.0",
+    "mcap-protobuf-support>=0.5.4",
+    "mcap-ros2-support>=0.5.7",
+    "numpy>=2.4.6",
+    "zstandard>=0.25.0",
+]
+
+[project.optional-dependencies]
+arrow = [
+    "pyarrow>=25.0.1",
+]
+# Native object-store data roots (gs://, s3://, az://): obstore is the Rust
+# object_store crate as a single dependency-free wheel; local-path roots
+# never import it.
+bucket = ["obstore>=0.10.0"]
+openai = ["openai>=1.66.0"]
+
+[project.urls]
+Repository = "https://github.com/Hebbian-Robotics/hflow"
+Documentation = "https://github.com/Hebbian-Robotics/hflow/tree/main/docs"
+Issues = "https://github.com/Hebbian-Robotics/hflow/issues"
+
+[project.scripts]
+hflow = "hflow.cli:main"
+
+[dependency-groups]
+dev = [
+    "obstore>=0.10.0", # the bucket extra, present in dev so the suite tests it
+    "pytest>=9.1.1",
+    "pyyaml>=6.0.3",
+    "ruff>=0.16.2",
+    "ty>=0.0.71",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.33,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv]
+# Supply-chain hardening: refuse PyPI releases younger than 5 days.
+# Override per-package via `exclude-newer-package = { foo = false }` for
+# trusted first-party packages.
+exclude-newer = "5 days"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "C4",
+    "UP",
+    "ANN",
+    "PTH",
+    "RET",
+    "SIM",
+    "TID",
+    "RUF",
+]
+ignore = ["E501", "B008", "C901", "RET504", "ANN401"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ty.rules]
+division-by-zero = "error"
+deprecated = "error"
+unused-ignore-comment = "error"
+possibly-unresolved-reference = "error"
+
+[tool.ty.src]
+# examples/openai_vision imports the user's own `openai` client: bundling a
+# VLM client is a non-goal (examples ARE the docs), so the package is
+# deliberately not a dependency and the example is excluded from typechecking.
+exclude = ["examples/openai_vision/"]

@@ -1,0 +1,36 @@
+"""ffmpeg-backed helpers: the pinned binary, the frame instrument, the contact sheet.
+
+Public surface used in checks::
+
+    stats = hflow.ffmpeg.frame_stats(ep.video("wrist_cam"))
+    sheet = hflow.ffmpeg.contact_sheet(ep.frames(fps=0.5), out_path)
+"""
+
+from hflow.ffmpeg._binary import (
+    FFMPEG_ENV_VAR,
+    FFPROBE_ENV_VAR,
+    FfmpegNotFoundError,
+    FfprobeNotFoundError,
+    ffmpeg_path,
+    ffmpeg_version,
+    ffprobe_path,
+    ffprobe_version,
+)
+from hflow.ffmpeg._contact_sheet import ContactSheet, contact_sheet
+from hflow.ffmpeg._instrument import FrameStats, InstrumentParseError, frame_stats
+
+__all__ = [
+    "FFMPEG_ENV_VAR",
+    "FFPROBE_ENV_VAR",
+    "ContactSheet",
+    "FfmpegNotFoundError",
+    "FfprobeNotFoundError",
+    "FrameStats",
+    "InstrumentParseError",
+    "contact_sheet",
+    "ffmpeg_path",
+    "ffmpeg_version",
+    "ffprobe_path",
+    "ffprobe_version",
+    "frame_stats",
+]

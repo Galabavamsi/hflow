@@ -1,0 +1,55 @@
+name: Bug report
+description: Report reproducible behavior that does not match the documentation.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Do not include credentials, private URLs,
+        proprietary robot recordings, or personal data. Report security issues
+        through the private process in SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Provide the HFlow version or Git commit SHA.
+      placeholder: Paste the version or output from `git rev-parse HEAD`.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Include operating system, Python version, architecture, and Docker version when relevant.
+      placeholder: Ubuntu 24.04, Python 3.11, x86_64, Docker 29
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: List the smallest commands or code that reproduce the problem using synthetic data where possible.
+      placeholder: |
+        1. Run ...
+        2. Configure ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include a concise error and sanitized logs when useful.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add relevant format, runtime, or deployment details. Remove sensitive data.

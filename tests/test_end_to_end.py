@@ -1,0 +1,223 @@
+"""The vertical slice, end to end: one episode in, measurements out, zero
+infrastructure. Mirrors the README design-target example."""
+
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pytest
+
+import hflow
+from hflow.testing import synthesize_episode
+
+
+def check_joint_smoothness(joints: np.ndarray, rate_hz: float) -> dict[str, float]:
+    velocities = np.abs(np.diff(joints, axis=0)) * rate_hz
+    return {
+        "max_velocity_rad_s": float(velocities.max()),
+        "mean_velocity_rad_s": float(velocities.mean()),
+    }
+
+
+@pytest.fixture(scope="module")
+def source_episode(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return synthesize_episode(tmp_path_factory.mktemp("e2e-source") / "episode_0001.mcap")
+
+
+@pytest.fixture(scope="module")
+def report_and_app(
+    source_episode: Path, tmp_path_factory: pytest.TempPathFactory
+) -> tuple[hflow.TestReport, hflow.App]:
+    app = hflow.App("kitchen-pipeline", data_root=tmp_path_factory.mktemp("e2e-data"))
+
+    @app.check()
+    def joint_smoothness(ep: hflow.Episode) -> hflow.CheckResult:
+        joints = ep.channel("/joint_states").to_numpy()
+        result = check_joint_smoothness(joints, rate_hz=100)
+        return hflow.CheckResult(measurements=dict(result))
+
+    @app.check()
+    def timestamps(ep: hflow.Episode) -> hflow.CheckResult:
+        return hflow.checks.timestamp_regularity(ep, tolerance_s=0.001)
+
+    @app.check()
+    def joint_jumps(ep: hflow.Episode) -> hflow.CheckResult:
+        return hflow.checks.joint_discontinuity(ep, velocity_limit=3.0)
+
+    @app.check(critical=True)
+    def camera_blackout(ep: hflow.Episode) -> hflow.CheckResult:
+        stats = hflow.ffmpeg.frame_stats(ep.video("wrist_cam"))
+        return hflow.CheckResult(
+            measurements={"black_pct": stats.black_frame_pct},
+            verdict=stats.black_frame_pct < 50.0,
+        )
+
+    report = app.test(source_episode, verbose=False)
+    return report, app
+
+
+def test_whole_pipeline_runs_without_quarantine(
+    report_and_app: tuple[hflow.TestReport, hflow.App],
+) -> None:
+    report, _app = report_and_app
+    assert not report.quarantined
+    assert report.canonical_path.is_file()
+    assert [run.status for run in report.checks] == [
+        "measured",
+        "measured",
+        "measured",
+        "passed",
+    ]
+    summary_text = report.summary()
+    assert "pipeline_version=" in summary_text
+    assert "camera_blackout" in summary_text
+
+
+def test_ported_user_check_saw_real_joints(
+    report_and_app: tuple[hflow.TestReport, hflow.App],
+) -> None:
+    report, _app = report_and_app
+    by_name = {run.check.name: run for run in report.checks}
+    smoothness = by_name["joint_smoothness"].result
+    assert smoothness is not None
+    max_velocity = smoothness.measurements["max_velocity_rad_s"]
+    assert isinstance(max_velocity, float)
+    # The fixture injects a 0.8 rad step at 100 Hz -> ~80 rad/s spike.
+    assert max_velocity > 10.0
+
+
+def test_builtin_checks_found_the_injected_defects(
+    report_and_app: tuple[hflow.TestReport, hflow.App],
+) -> None:
+    report, _app = report_and_app
+    by_name = {run.check.name: run for run in report.checks}
+
+    jumps = by_name["joint_jumps"].result
+    assert jumps is not None
+    violation_count = jumps.measurements["/joint_states/violation_count"]
+    assert isinstance(violation_count, int)
+    assert violation_count >= 1
+    assert jumps.intervals, "the injected joint jump must yield an interval"
+
+    stamps_result = by_name["timestamps"].result
+    assert stamps_result is not None
+    median_dt = stamps_result.measurements["/joint_states/median_dt_s"]
+    assert isinstance(median_dt, float)
+    assert median_dt == pytest.approx(0.01, rel=1e-3)
+
+    blackout = by_name["camera_blackout"].result
+    assert blackout is not None
+    black_pct = blackout.measurements["black_pct"]
+    assert isinstance(black_pct, float)
+    # The fixture blacks out 1s of the 8s wrist stream: ~12.5% of frames.
+    assert 5.0 < black_pct < 25.0
+
+
+def test_canonical_episode_accessors(
+    report_and_app: tuple[hflow.TestReport, hflow.App],
+) -> None:
+    report, _app = report_and_app
+    with hflow.Episode(report.canonical_path) as episode:
+        assert len(episode.cameras) == 2
+        assert episode.metadata["task"] == "fold_napkin"
+        assert len(episode.metadata["pipeline_version"]) == 12
+
+        joints = episode.channel("/joint_states").to_numpy()
+        assert joints.shape[1] == 7
+
+        mp4 = episode.video("overhead_cam")
+        assert mp4.is_file() and mp4.stat().st_size > 0
+
+        frames = episode.frames("overhead_cam", fps=2.0)
+        assert 12 <= len(frames) <= 17  # ~8s at 2 fps
+        assert frames[0].path.read_bytes()[:2] == b"\xff\xd8"
+        # Frame log times map to SOURCE messages: at t=0.5s the fps filter
+        # emits the frame visible then -- source frame floor(0.5 * 15) = 7,
+        # i.e. round(7e9/15) ns after the first frame.
+        assert abs(frames[1].log_time_ns - frames[0].log_time_ns - 466_666_667) <= 1
+
+
+def test_arrow_export(report_and_app: tuple[hflow.TestReport, hflow.App]) -> None:
+    report, _app = report_and_app
+    with hflow.Episode(report.canonical_path) as episode:
+        table: Any = episode.channel("/joint_states").to_arrow()
+    assert table.num_rows == 800
+    assert "log_time_ns" in table.column_names
+    assert "position" in table.column_names
+
+
+def test_failed_critical_verdict_quarantines_and_skips_downstream(
+    source_episode: Path, tmp_path: Path
+) -> None:
+    app = hflow.App("strict-pipeline", data_root=tmp_path)
+
+    @app.check(critical=True)
+    def camera_blackout(ep: hflow.Episode) -> hflow.CheckResult:
+        stats = hflow.ffmpeg.frame_stats(ep.video("wrist_cam"))
+        return hflow.CheckResult(
+            measurements={"black_pct": stats.black_frame_pct},
+            verdict=stats.black_frame_pct < 1.0,  # fixture blackout exceeds this
+        )
+
+    @app.check()
+    def never_reached(ep: hflow.Episode) -> hflow.CheckResult:
+        return hflow.CheckResult(measurements={"ran": True})
+
+    report = app.test(source_episode, verbose=False)
+    assert report.quarantined
+    assert report.quarantine_tags == ["quarantined:camera_blackout"]
+    by_name = {run.check.name: run for run in report.checks}
+    assert by_name["never_reached"].status == "skipped"
+    assert by_name["camera_blackout"].status == "failed"
+
+
+def test_crashing_check_is_infrastructure_not_data(source_episode: Path, tmp_path: Path) -> None:
+    app = hflow.App("crashy-pipeline", data_root=tmp_path)
+
+    @app.check()
+    def exploding(ep: hflow.Episode) -> hflow.CheckResult:
+        raise RuntimeError("boom")
+
+    @app.check()
+    def still_runs(ep: hflow.Episode) -> hflow.CheckResult:
+        return hflow.CheckResult(measurements={"ran": True})
+
+    report = app.test(source_episode, verbose=False)
+    assert not report.quarantined
+    by_name = {run.check.name: run for run in report.checks}
+    assert by_name["exploding"].status == "error"
+    assert by_name["exploding"].error is not None and "boom" in by_name["exploding"].error
+    assert by_name["still_runs"].status == "measured"
+
+
+def test_resource_declaring_checks_run_after_plain_ones(
+    source_episode: Path, tmp_path: Path
+) -> None:
+    app = hflow.App(
+        "ordered-pipeline", data_root=tmp_path, endpoints={"judge": "http://localhost:9"}
+    )
+    execution_order: list[str] = []
+
+    @app.check(uses="judge")
+    def expensive(ep: hflow.Episode) -> hflow.CheckResult:
+        execution_order.append("expensive")
+        return hflow.CheckResult()
+
+    @app.check()
+    def cheap(ep: hflow.Episode) -> hflow.CheckResult:
+        execution_order.append("cheap")
+        return hflow.CheckResult()
+
+    app.test(source_episode, verbose=False)
+    assert execution_order == ["cheap", "expensive"]
+
+
+def test_missing_provider_alias_fails_preflight(source_episode: Path, tmp_path: Path) -> None:
+    app = hflow.App("misconfigured", data_root=tmp_path)
+
+    @app.check(uses="judge")
+    def needs_endpoint(ep: hflow.Episode) -> hflow.CheckResult:
+        return hflow.CheckResult()
+
+    with pytest.raises(ValueError, match="judge"):
+        app.test(source_episode, verbose=False)

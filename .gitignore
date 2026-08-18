@@ -1,0 +1,14 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Default data root for pipelines and the quickstart example (user data,
+# never source).
+data/
