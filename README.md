@@ -10,7 +10,9 @@
   <a href="./LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="Apache 2.0 license">
   </a>
-  <img src="https://img.shields.io/badge/Discord-coming%20soon-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord community coming soon">
+  <a href="https://discord.gg/vacepQvjmg">
+    <img src="https://img.shields.io/badge/Discord-join%20us-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Join the Discord community">
+  </a>
 </p>
 
 # HFlow
@@ -104,13 +106,13 @@ implemented in this repository and is not a pre-v1 release commitment.
 
 ## Community and hosted interest
 
-<!-- Add the Google Form and Discord invite links to the two entries below once they are live. -->
+<!-- Add the Google Form link to the entry below once it is live. -->
 
 - **Hosted version interest:** Google Form coming soon.
-- **Community Discord:** invite link coming soon.
+- **Community Discord:** [join us](https://discord.gg/vacepQvjmg) for questions, feedback, and contribution discussion.
 
-Until then, use [GitHub issues](https://github.com/Hebbian-Robotics/hflow/issues)
-for reproducible bugs and scoped feature requests.
+For reproducible bugs and scoped feature requests, use
+[GitHub issues](https://github.com/Hebbian-Robotics/hflow/issues).
 
 ## Install and try it
 
