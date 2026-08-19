@@ -105,6 +105,23 @@ uv run ruff format
 uv run ty check
 ```
 
+### Optional: Pre-commit hooks
+
+To catch style issues before you commit, install pre-commit hooks (optional; CI will catch anything you miss):
+
+```bash
+uvx pre-commit install
+# or: pipx run pre-commit install
+```
+
+Hooks will run automatically on `git commit`. To run them manually on all files:
+
+```bash
+uvx pre-commit run --all-files
+```
+
+Hooks enforce the same style gates documented above: `ruff check --fix` and `ruff format`.
+
 When Markdown changes, run the same link check as CI:
 
 ```bash
