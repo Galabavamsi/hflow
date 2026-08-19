@@ -3,7 +3,14 @@
     <img src="docs/assets/hebbian-logo-on-black.svg" alt="Hebbian Robotics" width="128">
   </a>
   <br>
-  <br>
+  <strong>Hebbian Robotics (YC S26)</strong>
+</p>
+
+<h1 align="center">HFlow</h1>
+
+<p align="center"><strong>Open-source SDK for building Physical AI data pipelines</strong></p>
+
+<p align="center">
   <a href="https://www.ycombinator.com/companies/hebbian-robotics">
     <img src="https://img.shields.io/badge/Y%20Combinator%20-S26-F26522?style=flat-square&logo=ycombinator&logoColor=white" alt="Y Combinator S26">
   </a>
@@ -15,11 +22,7 @@
   </a>
 </p>
 
-# HFlow
-
-**Open-source SDK for building Physical AI data pipelines**
-
-Hebbian Robotics (YC S26) built HFlow as reusable infrastructure for processing multimodal physical-AI data
+HFlow provides reusable infrastructure for processing multimodal physical-AI data
 (human egocentric recordings, robot teleoperation demonstrations, autonomous
 policy rollouts, and other sensor-rich episodes). The goal: anyone who
 needs to process this data should be able to plug their existing transformation,
