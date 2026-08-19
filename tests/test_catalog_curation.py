@@ -366,6 +366,19 @@ def test_cli_stale_prints_source_uris_for_ingest(
     assert "1 episode(s)" in captured.err
 
 
+def test_cli_stale_reports_a_broken_pipeline_file_instead_of_crashing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    Catalog(tmp_path / "catalog")
+    broken_pipeline = tmp_path / "pipeline.py"
+    broken_pipeline.write_text("raise RuntimeError('boom at import time')\n")
+    exit_code = cli_main(
+        ["stale", "--catalog", str(tmp_path / "catalog"), "--pipeline", str(broken_pipeline)]
+    )
+    assert exit_code == 2
+    assert "boom at import time" in capsys.readouterr().err
+
+
 def test_append_accepts_non_json_measurement_scalars(tmp_path: Path) -> None:
     """numpy scalars are user data: they must fingerprint, not crash the append."""
     import numpy as np

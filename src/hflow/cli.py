@@ -279,7 +279,13 @@ def _command_stale(arguments: argparse.Namespace) -> int:
             print(f"stale: cannot import pipeline file {pipeline_file}", file=sys.stderr)
             return 2
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        try:
+            # The pipeline file is arbitrary user code: any exception it
+            # raises is a boundary failure of this command, not a crash.
+            spec.loader.exec_module(module)
+        except Exception as error:
+            print(f"stale: importing {pipeline_file} failed: {error}", file=sys.stderr)
+            return 2
         app = getattr(module, app_variable, None)
         if not isinstance(app, App):
             print(

@@ -114,14 +114,16 @@ def hand_visibility(episode: hflow.Episode) -> hflow.CheckResult:
         ],
     )
     answer_text = response.output_text.strip()
-    visible_tile_count = int(answer_text) if answer_text.isdigit() else 0
-    return hflow.CheckResult(
-        measurements={
-            "hands_visible_fraction": min(visible_tile_count, tile_count) / tile_count,
-            "hands_visible_raw_answer": answer_text,
-            "hands_sampled_frame_count": tile_count,
-        }
-    )
+    measurements: dict[str, hflow.MeasurementValue] = {
+        "hands_visible_raw_answer": answer_text,
+        "hands_sampled_frame_count": tile_count,
+    }
+    # An unparsable answer is an unknown, not zero visible hands: record the
+    # raw text and a tag instead of inventing a fraction.
+    if answer_text.isdigit():
+        measurements["hands_visible_fraction"] = min(int(answer_text), tile_count) / tile_count
+        return hflow.CheckResult(measurements=measurements)
+    return hflow.CheckResult(measurements=measurements, tags=["hands_visible_unparsed"])
 
 
 def main() -> None:

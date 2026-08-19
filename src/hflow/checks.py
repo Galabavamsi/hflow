@@ -8,12 +8,79 @@ verdicts; thresholds user-owned). Wrap them to register::
 
 import hashlib
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import numpy as np
 
 from hflow.episode import Episode
 from hflow.ffmpeg import frame_stats
-from hflow.steps import CheckResult, Interval
+from hflow.steps import CheckResult, Interval, MeasurementValue
+
+
+@dataclass(frozen=True)
+class _JointMotionProfile:
+    """Finite-difference motion facts of one state channel, computed once for
+    every check that reasons about joint speed."""
+
+    stamps_ns: np.ndarray
+    deltas_s: np.ndarray
+    per_step_max_speed: np.ndarray  # max over joints of |dq/dt|, one per step
+    nonpositive_dt_count: int
+
+
+def _joint_motion_profile(
+    episode: Episode, topic: str, field: str | None
+) -> _JointMotionProfile | None:
+    """``None`` when the channel has fewer than two messages (no motion to
+    profile); callers record the message count and stop."""
+    channel = episode.channel(topic)
+    positions = channel.to_numpy(field)
+    if positions.ndim == 1:
+        positions = positions[:, np.newaxis]
+    stamps_ns = channel.timestamps
+    if len(stamps_ns) < 2:
+        return None
+    deltas_s = np.diff(stamps_ns) / 1e9
+    safe_deltas_s = np.where(deltas_s > 0, deltas_s, np.nan)
+    velocities = np.abs(np.diff(positions, axis=0)) / safe_deltas_s[:, np.newaxis]
+    return _JointMotionProfile(
+        stamps_ns=stamps_ns,
+        deltas_s=deltas_s,
+        per_step_max_speed=np.nanmax(velocities, axis=1),
+        nonpositive_dt_count=int(np.sum(deltas_s <= 0)),
+    )
+
+
+def _mask_run_intervals(
+    stamps_ns: np.ndarray,
+    step_mask: np.ndarray,
+    label: str,
+    *,
+    min_duration_s: float = 0.0,
+) -> list[Interval]:
+    """Contiguous True runs of a per-step mask as labeled intervals.
+
+    Step ``i`` spans ``stamps_ns[i]``..``stamps_ns[i + 1]``, so a run of steps
+    ``r``..``i - 1`` spans ``stamps_ns[r]``..``stamps_ns[i]``.
+    """
+    intervals: list[Interval] = []
+
+    def append_run(run_start_index: int, run_end_index: int) -> None:
+        start_ns = int(stamps_ns[run_start_index])
+        end_ns = int(stamps_ns[run_end_index])
+        if (end_ns - start_ns) / 1e9 >= min_duration_s:
+            intervals.append(Interval(start_ns=start_ns, end_ns=end_ns, label=label))
+
+    run_start: int | None = None
+    for index, in_run in enumerate(step_mask):
+        if in_run and run_start is None:
+            run_start = index
+        elif not in_run and run_start is not None:
+            append_run(run_start, index)
+            run_start = None
+    if run_start is not None:
+        append_run(run_start, len(stamps_ns) - 1)
+    return intervals
 
 
 def timestamp_regularity(
@@ -39,7 +106,7 @@ def timestamp_regularity(
         if topics is not None
         else sorted(topic for topic, info in infos.items() if info.message_count >= 2)
     )
-    measurements: dict[str, float | int | str | bool] = {}
+    measurements: dict[str, MeasurementValue] = {}
     intervals: list[Interval] = []
 
     for topic in selected:
@@ -99,53 +166,23 @@ def joint_discontinuity(
     known to invert on real defects (the Voxel51 result), so the threshold
     and any verdict stay user-owned.
     """
-    channel = episode.channel(topic)
-    positions = channel.to_numpy(field)
-    if positions.ndim == 1:
-        positions = positions[:, np.newaxis]
-    stamps_ns = channel.timestamps
-    if len(stamps_ns) < 2:
-        return CheckResult(measurements={f"{topic}/message_count": len(stamps_ns)})
-
-    deltas_s = np.diff(stamps_ns) / 1e9
-    nonpositive_dt_count = int(np.sum(deltas_s <= 0))
-    safe_deltas_s = np.where(deltas_s > 0, deltas_s, np.nan)
-    velocities = np.abs(np.diff(positions, axis=0)) / safe_deltas_s[:, np.newaxis]
-    per_step_max = np.nanmax(velocities, axis=1)
-    violation_mask = per_step_max > velocity_limit
-
-    intervals: list[Interval] = []
-    run_start: int | None = None
-    for index, violating in enumerate(violation_mask):
-        if violating and run_start is None:
-            run_start = index
-        elif not violating and run_start is not None:
-            intervals.append(
-                Interval(
-                    start_ns=int(stamps_ns[run_start]),
-                    end_ns=int(stamps_ns[index]),
-                    label=f"joint_discontinuity:{topic}",
-                )
-            )
-            run_start = None
-    if run_start is not None:
-        intervals.append(
-            Interval(
-                start_ns=int(stamps_ns[run_start]),
-                end_ns=int(stamps_ns[-1]),
-                label=f"joint_discontinuity:{topic}",
-            )
+    profile = _joint_motion_profile(episode, topic, field)
+    if profile is None:
+        return CheckResult(
+            measurements={f"{topic}/message_count": len(episode.channel(topic).timestamps)}
         )
-
+    violation_mask = profile.per_step_max_speed > velocity_limit
     return CheckResult(
         measurements={
-            f"{topic}/max_abs_velocity": float(np.nanmax(per_step_max)),
+            f"{topic}/max_abs_velocity": float(np.nanmax(profile.per_step_max_speed)),
             f"{topic}/velocity_limit": velocity_limit,
             f"{topic}/violation_count": int(np.sum(violation_mask)),
             f"{topic}/violation_pct": float(np.mean(violation_mask) * 100.0),
-            f"{topic}/nonpositive_dt_count": nonpositive_dt_count,
+            f"{topic}/nonpositive_dt_count": profile.nonpositive_dt_count,
         },
-        intervals=intervals,
+        intervals=_mask_run_intervals(
+            profile.stamps_ns, violation_mask, f"joint_discontinuity:{topic}"
+        ),
     )
 
 
@@ -174,7 +211,7 @@ def camera_frame_stats(
     stay user-owned.
     """
     selected_cameras = list(cameras) if cameras is not None else episode.cameras
-    measurements: dict[str, float | int | str | bool] = {}
+    measurements: dict[str, MeasurementValue] = {}
     intervals: list[Interval] = []
     for topic in selected_cameras:
         stamps_ns = episode.channel(topic).timestamps
@@ -236,54 +273,24 @@ def idle_fraction(
     Evidence for curation cuts over mostly-stationary demonstrations -- the
     keep/drop policy (and any verdict) stays user-owned.
     """
-    channel = episode.channel(topic)
-    positions = channel.to_numpy(field)
-    if positions.ndim == 1:
-        positions = positions[:, np.newaxis]
-    stamps_ns = channel.timestamps
-    if len(stamps_ns) < 2:
-        return CheckResult(measurements={f"{topic}/message_count": len(stamps_ns)})
-
-    deltas_s = np.diff(stamps_ns) / 1e9
-    safe_deltas_s = np.where(deltas_s > 0, deltas_s, np.nan)
-    velocities = np.abs(np.diff(positions, axis=0)) / safe_deltas_s[:, np.newaxis]
-    per_step_max = np.nanmax(velocities, axis=1)
-    idle_mask = per_step_max < velocity_epsilon
-    positive_deltas_s = np.where(deltas_s > 0, deltas_s, 0.0)
+    profile = _joint_motion_profile(episode, topic, field)
+    if profile is None:
+        return CheckResult(
+            measurements={f"{topic}/message_count": len(episode.channel(topic).timestamps)}
+        )
+    idle_mask = profile.per_step_max_speed < velocity_epsilon
+    positive_deltas_s = np.where(profile.deltas_s > 0, profile.deltas_s, 0.0)
     total_span_s = float(np.sum(positive_deltas_s))
     idle_total_s = float(np.sum(positive_deltas_s[idle_mask]))
-
-    intervals: list[Interval] = []
-    run_start: int | None = None
-    for index, is_idle in enumerate(idle_mask):
-        if is_idle and run_start is None:
-            run_start = index
-        elif not is_idle and run_start is not None:
-            if (stamps_ns[index] - stamps_ns[run_start]) / 1e9 >= min_interval_s:
-                intervals.append(
-                    Interval(
-                        start_ns=int(stamps_ns[run_start]),
-                        end_ns=int(stamps_ns[index]),
-                        label=f"idle:{topic}",
-                    )
-                )
-            run_start = None
-    if run_start is not None and (stamps_ns[-1] - stamps_ns[run_start]) / 1e9 >= min_interval_s:
-        intervals.append(
-            Interval(
-                start_ns=int(stamps_ns[run_start]),
-                end_ns=int(stamps_ns[-1]),
-                label=f"idle:{topic}",
-            )
-        )
-
     return CheckResult(
         measurements={
             f"{topic}/idle_fraction": idle_total_s / total_span_s if total_span_s else 0.0,
             f"{topic}/idle_total_s": idle_total_s,
             f"{topic}/velocity_epsilon": velocity_epsilon,
         },
-        intervals=intervals,
+        intervals=_mask_run_intervals(
+            profile.stamps_ns, idle_mask, f"idle:{topic}", min_duration_s=min_interval_s
+        ),
     )
 
 
