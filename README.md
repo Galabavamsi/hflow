@@ -2,16 +2,24 @@
   <a href="https://hebbianrobotics.com">
     <img src="docs/assets/hebbian-logo-on-black.svg" alt="Hebbian Robotics" width="128">
   </a>
+  <br>
+  <br>
+  <a href="https://www.ycombinator.com/companies/hebbian-robotics">
+    <img src="https://img.shields.io/badge/Y%20Combinator%20-S26-F26522?style=flat-square&logo=ycombinator&logoColor=white" alt="Y Combinator S26">
+  </a>
+  <a href="./LICENSE">
+    <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="Apache 2.0 license">
+  </a>
+  <img src="https://img.shields.io/badge/Discord-coming%20soon-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord community coming soon">
 </p>
 
 # HFlow
 
-**An open-source SDK for defining quality control pipelines for turning Physical AI data into
-quality-checked, queryable datasets for training policy models.**
+**Open-source SDK for building Physical AI data pipelines**
 
-HFlow is reusable infrastructure for processing multimodal physical-AI data:
-human egocentric recordings, robot teleoperation demonstrations, autonomous
-policy rollouts, and other sensor-rich episodes. The goal: anyone who
+Hebbian Robotics (YC S26) built HFlow as reusable infrastructure for processing multimodal physical-AI data
+(human egocentric recordings, robot teleoperation demonstrations, autonomous
+policy rollouts, and other sensor-rich episodes). The goal: anyone who
 needs to process this data should be able to plug their existing transformation,
 quality-checking, labeling, and enrichment code into one pipeline instead of
 rebuilding orchestration, artifact storage, versioning, observability, and
