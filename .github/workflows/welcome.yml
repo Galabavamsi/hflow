@@ -1,0 +1,81 @@
+name: welcome
+
+# Comments on the first issue and the first pull request a contributor opens.
+# Hand-rolled instead of actions/first-interaction, whose isFirstPullRequest()
+# does not filter by creator and therefore greets repeat contributors.
+# pull_request_target is safe here: the job never checks out PR code.
+
+on:
+  pull_request_target:
+    types: [opened]
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  welcome:
+    runs-on: ubuntu-latest
+    if: (github.event.pull_request.user.type || github.event.issue.user.type) != 'Bot'
+    steps:
+      - name: Welcome first-time contributors
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const openedItem = context.payload.pull_request ?? context.payload.issue
+            const isPullRequest = Boolean(context.payload.pull_request)
+            const author = openedItem.user.login
+
+            // Issues and pull requests share one numbering; listForRepo returns
+            // both, marking pull requests with a `pull_request` key.
+            const authoredItems = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              creator: author,
+              state: 'all',
+              per_page: 100,
+            })
+            const sameTypeCount = authoredItems.filter(
+              (item) => Boolean(item.pull_request) === isPullRequest,
+            ).length
+
+            // The just-opened item is included in the listing, so 1 means first.
+            if (sameTypeCount > 1) {
+              core.info(`@${author} has ${sameTypeCount} ${isPullRequest ? 'PRs' : 'issues'}; not their first.`)
+              return
+            }
+
+            const pullRequestMessage = [
+              `👋 Hi @${author} — thank you so much for your first contribution to HFlow!`,
+              '',
+              'A maintainer will review your pull request as soon as possible. In the meantime:',
+              '',
+              '- ⭐ Star the repo: https://github.com/Hebbian-Robotics/hflow',
+              '- 📖 Check [CONTRIBUTING.md](https://github.com/Hebbian-Robotics/hflow/blob/main/CONTRIBUTING.md) for the validation commands CI will run',
+              '- 📣 Share the project with your network',
+              '',
+              'We are excited to have you here and appreciate your help making the project better! 🙌',
+            ].join('\n')
+
+            const issueMessage = [
+              `👋 Hi @${author} — thank you for opening your first issue on HFlow!`,
+              '',
+              'We appreciate you taking the time to report this. A maintainer will take a look as soon as possible.',
+              '',
+              'In the meantime, feel free to:',
+              '',
+              '- ⭐ Star the repo: https://github.com/Hebbian-Robotics/hflow',
+              '- 🛠️ Browse the [good first issues](https://github.com/Hebbian-Robotics/hflow/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) if you would like to contribute',
+              '- 📣 Share the project with your network',
+              '',
+              'We are glad to have you here! 🙌',
+            ].join('\n')
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: openedItem.number,
+              body: isPullRequest ? pullRequestMessage : issueMessage,
+            })
