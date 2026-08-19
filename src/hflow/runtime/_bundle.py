@@ -24,8 +24,9 @@ Bundle contents:
 - ``user/`` -- a copy of the user's pipeline file and requirements, mounted
   into the containers.
 - ``user-venv`` named volume + an init service that builds the user's venv
-  with ``uv`` or ``pip`` inside the Airflow image (the external-python
-  pattern: user dependencies never meet Airflow's pins). The venv is rebuilt
+  with ``python -m venv`` + ``pip`` inside the Airflow image (the
+  external-python pattern: user dependencies never meet Airflow's pins;
+  the image ships no ``uv``). The venv is rebuilt
   only when the requirements/hflow-source content hash changes (a marker
   file inside the volume is the checkpoint).
 

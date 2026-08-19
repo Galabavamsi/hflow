@@ -149,6 +149,42 @@ FROM intervals WHERE label LIKE 'gap:%'
 GROUP BY episode_id ORDER BY gap_seconds DESC
 ```
 
+Exact duplicates, from the built-in `content_digest` check (`episode_id`
+already dedupes byte-identical canonical files; the digest catches the same
+recorded content landed under different names or provenance):
+
+```sql
+SELECT value_text AS digest, count(*) AS copies, list(episode_id) AS episodes
+FROM measurements WHERE key = 'content_digest'
+GROUP BY digest HAVING count(*) > 1
+```
+
+### Finding stale episodes to reprocess
+
+The corpus is assumed permanently mixed-version, so "reprocess everything" is
+never the plan; the plan is to find exactly which sources are behind and
+re-ingest only those. `hflow.stale_episodes()` compares each source's **latest**
+cataloged run against the versions you pass:
+
+```python
+stale = hflow.stale_episodes("data/catalog", pipeline_version=app.pipeline_version)
+for episode in stale:
+    app.process(episode.source_uri)
+```
+
+or on the command line, where stdout is exactly the pipeable source-URI list:
+
+```bash
+hflow stale --catalog data/catalog --pipeline pipeline.py | xargs hflow ingest
+```
+
+`--pipeline` imports your pipeline file and compares against its current
+`pipeline_version` plus the current episode format version; pass
+`--pipeline-version <hash>` instead to compare against a known hash without
+importing anything. Staleness follows the source recording, not the episode
+id: reprocessing mints a new content-addressed `episode_id`, and a source
+whose newest run already carries the current versions is not stale.
+
 ### Coverage denominators
 
 Every `CurationReport` carries (and `summary()` always prints) which checks

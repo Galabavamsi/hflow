@@ -26,7 +26,7 @@ scope** means it is deliberately not part of this repository.
 | Input formats and triggering | Data from multiple sources and vendors lands in a bucket | MCAP input only, triggered explicitly through the SDK/CLI or Airflow API; no bucket/filesystem watcher | **Simplified; more readers deferred** |
 | Canonical episode format | MCAP, H.264 GOPs matched to read patterns, topic-group chunking, and version stamps | An independently specified, standard-MCAP convention implementing those published ideas; interoperability is tested, but compatibility with Dyna's undisclosed internal layout is not claimed | **Implemented independently** |
 | Ingestion graph and gates | Airflow transformation, quality-check, and enrichment stages with run profiles and critical/non-critical steps | The stage graph, profiles, quarantine gates, local Compose runtime, and bring-your-own Airflow bundle are implemented | **Implemented at small scale** |
-| Checkpoint and replay | Durable pipeline state, checkpointable multi-day runs, replay from any step, and selective reprocessing | Durable outputs, a transform completion marker, versioned catalog facts, and stage-profile reruns; no general arbitrary-step checkpoint/replay engine | **Partial; arbitrary-step replay deferred** |
+| Checkpoint and replay | Durable pipeline state, checkpointable multi-day runs, replay from any step, cross-DAG artifact sharing, and selective reprocessing | Durable outputs, a sync completion marker, versioned catalog facts, stage-profile reruns that reuse the previous run's published canonical episode (cross-run artifact sharing through the data root), and `hflow stale` for selective reprocessing; no general arbitrary-step checkpoint/replay engine | **Partial; arbitrary-step replay deferred** |
 | Per-step compute | Resources and worker allocation tailored to each step | `requires=`/`uses=` record intent, validate configured endpoint aliases, and put cheaper steps first; they do not yet route tasks to heterogeneous worker pools or probe GPU/endpoint health | **Deferred** |
 | Batch scheduling | Byte-balanced batches and staggered starts, plus joint optimization against network, I/O, database, and worker limits | First-fit-decreasing byte balancing and deterministic stagger are implemented; the joint optimizer is not | **Simplified; optimizer deferred** |
 | Catalog and curation | Transactional database, CDC, analytical warehouse, and a memory-mapped training manifest | Parquet catalog plus DuckDB SQL and Parquet manifests; no database/CDC/warehouse stack and no training dataloader | **Simplified; training loader out of scope** |
@@ -102,7 +102,7 @@ The full normative convention lives in [FORMAT.md](./FORMAT.md).
 
 ## Ingestion: the Airflow DAG
 
-**Dyna says**: their original single-Kubernetes-job pipeline was rewritten as an Airflow DAG with three stage families: **data transformation** (resample all streams onto a common timestamp grid, compute derived signals, encode canonical MCAP, index metadata), **quality check** (a runtime-toggleable pre/post gate around transformation), and **feature enrichment** (performance labels, captions, segmentations). The rewrite bought per-step resource allocation, critical/non-critical step tagging (a non-critical failure doesn't cancel the run), and per-run step toggles ("run profiles": full processing, metadata-only backfill, re-label pass). Pipeline state is "backed with durable storage rather than keeping them in a live process," enabling checkpointable runs, replay from any step, and selective reprocessing.
+**Dyna says**: their original single-Kubernetes-job pipeline was rewritten as an Airflow DAG with three stage families: **data transformation** (resample all streams onto a common timestamp grid, compute derived signals, encode canonical MCAP, index metadata), **quality check** (a runtime-toggleable pre/post gate around transformation), and **feature enrichment** (performance labels, captions, segmentations). The rewrite bought per-step resource allocation, critical/non-critical step tagging (a non-critical failure doesn't cancel the run), and per-run step toggles ("run profiles": full processing, metadata-only backfill, re-label pass). Pipeline state is "backed with durable storage rather than keeping them in a live process," enabling checkpointable runs, replay from any step, cross-DAG artifact sharing, and selective reprocessing.
 
 HFlow adopts the stage model, run profiles, and critical/non-critical gate
 semantics: the three-stage skeleton is fixed, and user steps hang off it. Its
@@ -126,7 +126,7 @@ currently arrange those resources outside HFlow.
 
 ### Batching
 
-**Dyna says**: at scale, the scheduler database became the choke point; the fixes were staggered batch start times and bin-packing input batches into near-equal *bytes* (file sizes vary widely and unbalance workers). Both mechanisms are small, so HFlow includes simple versions in v1: a planning task runs first-fit-decreasing over file sizes into near-equal-byte groups for mapped tasks, and batch starts take configurable jitter. What stays on the scale path is Dyna's joint optimizer tuning worker counts against network/IO/DB constraints.
+**Dyna says**: at scale, the scheduler database became the choke point; the fixes were staggered batch start times and bin-packing input batches into near-equal *bytes* (file sizes vary widely and unbalance workers). Both mechanisms are small, so HFlow includes simple versions in v1: a planning task runs first-fit-decreasing over file sizes into near-equal-byte groups for mapped tasks, and batch starts are spaced by a configurable stagger interval (deterministic even spacing, which desynchronizes identical steps at least as well as random jitter and reproduces exactly). What stays on the scale path is Dyna's joint optimizer tuning worker counts against network/IO/DB constraints.
 
 ### Deployment modes
 
@@ -135,7 +135,7 @@ Airflow cannot be a normal pip dependency: its own maintainers state unconstrain
 1. **Docker mode (default).** `hflow up` renders a Compose bundle: Airflow 3.x services + Postgres + a worker container; the data root is a host directory mounted into the containers, or an object-store prefix (`s3://`, `gs://`, Azure) the tasks talk to natively (see [the runtime guide](./RUNTIME.md)). The SDK generates a private DAG-bundle directory (Airflow 3's `dag_bundle_config_list`) and pre-sets the configuration that traps newcomers (`dags_are_paused_at_creation=False`, examples off, object-storage-backed XCom so large accidental returns never hit the metadata DB).
 2. **Bring-your-own Airflow.** `hflow deploy` emits the same DAG bundle as plain files plus a light runtime package for an existing deployment (Astronomer, MWAA, Cloud Composer, self-managed); the data root is either an absolute filesystem path visible on every worker or an object-store prefix (`s3://`, `gs://`, Azure). Bucket roots use an obstore-backed local mirror, so media processing still receives ordinary local files while durable publication stays store-native.
 
-**Dependency isolation:** the worker image carries two environments, Airflow's own and a uv-managed venv built from the user's requirements. User steps execute in the user's venv (external-python pattern), so user dependencies and Airflow's pins never meet. The worker image is user-extensible (own base image, extra system packages) so a check needing a system library never requires touching HFlow.
+**Dependency isolation:** the worker image carries two environments, Airflow's own and a dedicated pip-built venv from the user's requirements. User steps execute in the user's venv (external-python pattern), so user dependencies and Airflow's pins never meet. The worker image is user-extensible (own base image, extra system packages) so a check needing a system library never requires touching HFlow.
 
 **Dev loop:** `app.test(episode)` runs the entire pipeline in-process on one episode: no Docker, no scheduler, no Airflow import at all (a plain Python runner with the same gate semantics, wrapping the `app.process()` operation the DAG maps over). Iterate on a check in seconds; `app.run()` when it works.
 
@@ -155,7 +155,7 @@ The blog pins down *where* QC sits and *what* it catches: quality checks run "as
 
 **Layer 2: gates are optional policy on critical checks.** A check may declare a user-owned `verdict` predicate. A failed **critical** verdict tags the episode `quarantined:<check>` and skips its downstream steps (no enrichment spend on an episode with a dead camera); a failed non-critical verdict records a tag and the run proceeds (exactly the blog's critical/non-critical semantics). Quarantine is a tag, never a deletion: the field's strongest teams keep failures ([DROID](https://droid-dataset.github.io/) releases them, [1X trains on them](https://www.1x.tech/discover/redwood-ai), RoboMIND annotates their causes). A check *crashing* is infrastructure, not data: it retries and can fail the run, but is never recorded as a bad episode.
 
-**Layer 3: curation is SQL over everything layer 1 recorded.** Measurements are catalog columns; a curation query emits `manifest.parquet`. Every measurement row carries the check's version (a content hash of its configuration), so re-running a changed check appends new-version rows and curation can pin version ranges: the mixed-version-corpus reality, applied to checks.
+**Layer 3: curation is SQL over everything layer 1 recorded.** Measurements are catalog columns; a curation query emits `manifest.parquet`. Every measurement row carries the check's version (a content hash of its configuration), so re-running a changed check appends new-version rows and curation can pin exact versions (versions are content hashes, so pins are equality or set membership, never ordered ranges): the mixed-version-corpus reality, applied to checks. The other half of that reality is selective reprocessing: `hflow stale` (`hflow.stale_episodes`) lists exactly which sources' latest runs predate the current pipeline/format versions, ready to pipe back into `hflow ingest` -- the blog's "find exactly which episodes are stale and reprocess only those".
 
 Dataset-level reporting includes **coverage denominators** (which checks ran on what fraction of episodes) because a statistic over half a delivery must not look like a statistic over all of it.
 
@@ -176,19 +176,19 @@ def joint_smoothness(ep: hflow.Episode) -> hflow.CheckResult:
 
 The accessor surface is chosen by asking what existing robotics QC scripts take as input: `ep.video(camera)` (lossless remux of in-band H.264 to MP4, no re-encode), `ep.frames(camera, fps=...)` (JPEG frames), `ep.channel(topic).to_numpy() / .to_arrow()`, `ep.metadata`. Users who want none of it can open `ep.path` with the raw `mcap` package; the file is standard MCAP.
 
-Built-in checks ship in the same shape users write, doubling as documentation. The starting set mirrors Dyna's named issues plus the field's established integrity checks: timestamp regularity (1/fps ± tolerance, [LeRobot's check](https://github.com/huggingface/lerobot)), cross-stream sync, frame count vs expected rate, camera blackout/freeze/exposure, joint discontinuity vs velocity limits, idle fraction, episode-length outliers, and exact-duplicate detection. The camera checks run as a **single-decode ffmpeg instrument**: blackframe + freezedetect + signalstats in one filter graph, so all three share one frame denominator and one decode. Motion-smoothness metrics ship as flags only, never default reject rules (the Voxel51 inversion result). Thresholds are always user-owned.
+Built-in checks ship in the same shape users write, doubling as documentation. The starting set mirrors Dyna's named issues plus the field's established integrity checks: timestamp regularity (1/fps ± tolerance, [LeRobot's check](https://github.com/huggingface/lerobot)) with cross-stream sync, camera blackout/freeze/exposure and frame count vs expected rate (`camera_frame_stats`), joint discontinuity vs velocity limits, and idle fraction. The camera checks run as a **single-decode ffmpeg instrument**: blackframe + freezedetect + signalstats in one filter graph, so all three share one frame denominator and one decode. Two of the classic cuts are corpus-relative judgments, so their checks record evidence and the decision is a curation query: `episode_duration` for length outliers, and `content_digest` for exact-duplicate detection (a `GROUP BY ... HAVING count(*) > 1`). Motion-smoothness metrics ship as flags only, never default reject rules (the Voxel51 inversion result). Thresholds are always user-owned.
 
 ### Model-based checks
 
 **Dyna says** enrichment "generates performance labels, video captions, segmentations". Model-based steps exist; mechanisms are unspecified.
 
-**HFlow chooses** frames-only VLM usage in v1: most models and the OpenAI-compatible protocol don't natively support video, so the honest unit is the frame. The user extracts frames explicitly (`ep.frames(fps=...)`), calls their own client (any OpenAI-compatible endpoint, hosted or self-run vLLM/Ollama; each step names its endpoint), and owns the aggregation of per-frame answers. There is no bundled VLM client; examples show plain `openai` calls. Two helpers survive because they encode non-obvious value: the **contact sheet** (N timestamped frames composited into one image; works even on single-image models, cheap on vision tokens) and frame extraction itself. Native-video protocols are a contributor-shaped provider extension point.
+**HFlow chooses** frames-only VLM usage in v1: most models and the OpenAI-compatible protocol don't natively support video, so the honest unit is the frame. The user extracts frames explicitly (`ep.frames(fps=...)`), calls their own client (any OpenAI-compatible endpoint, hosted or self-run vLLM/Ollama; each step names its endpoint), and owns the aggregation of per-frame answers. There is no bundled VLM client; examples show plain `openai` calls. Two helpers survive because they encode non-obvious value: the **contact sheet** (N timestamped frames composited into one image; works even on single-image models, cheap on vision tokens) and frame extraction itself. Dyna's "missing/occluded hand positions" is the canonical example of this surface -- hand visibility is a model judgment, not a signal statistic, and the [OpenAI vision example](../examples/openai_vision/pipeline.py) shows it as a contact-sheet VLM check. Native-video protocols are a contributor-shaped provider extension point.
 
 ## Catalog and curation storage
 
 **Dyna says**: manifest-building by walking files took ~48 hours at 43M episodes; the fix was a transactional production DB CDC-replicated into an analytical warehouse, making curation a SQL query that writes a columnar manifest, memory-mapped by training ranks.
 
-**HFlow chooses** the single-tenant collapse of the same interface: the ingest DAG appends one row per episode to Parquet under the data root, and [DuckDB](https://duckdb.org/) queries it directly. That is the same researcher-facing SQL (filter by task, robot, success, sensor dropout, version range) with zero additional services. The warehouse/CDC split solves contention between transactional load and columnar scans at tens of millions of rows; a single-tenant deployment with thousands of episodes doesn't have that problem. The manifest is Parquet; Dyna's download-once/mmap/zero-copy-shard loading trick lives in a training dataloader we don't ship, and is documented as a recipe for users who need it.
+**HFlow chooses** the single-tenant collapse of the same interface: the ingest DAG appends one row per episode to Parquet under the data root, and [DuckDB](https://duckdb.org/) queries it directly. That is the same researcher-facing SQL (filter by task, robot, success, sensor dropout, pinned versions) with zero additional services. The warehouse/CDC split solves contention between transactional load and columnar scans at tens of millions of rows; a single-tenant deployment with thousands of episodes doesn't have that problem. The manifest is Parquet; Dyna's download-once/mmap/zero-copy-shard loading trick lives in a training dataloader we don't ship, and is documented as [a recipe](./how-to/load-manifest-mmap.md) for users who need it.
 
 ## Storage and durability
 
@@ -196,18 +196,22 @@ Built-in checks ship in the same shape users write, doubling as documentation. T
 
 **HFlow chooses** a small-scale durability model drawn from production
 experience with Pareto. Today, canonical outputs and catalog facts are durable,
-the transform has a persisted completion marker, and run profiles can replay a
-stage. A general content-addressed checkpoint for every user step and replay
-from an arbitrary step remain design targets rather than current guarantees:
+the sync stage has a persisted completion marker, and run profiles can replay a
+stage -- a later run (a relabel pass, a different profile) consumes the
+canonical episode a previous run published, which is cross-DAG artifact
+sharing in miniature, through the data root. A general content-addressed
+checkpoint for every user step and replay from an arbitrary step remain design
+targets rather than current guarantees:
 
 - One local-directory-or-bucket **data root** holds everything durable; pipeline processes are stateless. Bucket roots download through an etag-validated per-worker mirror and publish canonical episodes and artifacts back to the store. Catalog appends use store-native create-if-absent writes.
 - **Content-addressed artifacts (target)**: derived outputs will be addressed by
   a hash of exactly the inputs that determine their bytes (configuration,
   instrument identity, model id). Changing a prompt or a filter graph should
   create a parallel artifact directory, never a migration.
-- **Completion markers (implemented narrowly)**: the canonical transform writes
-  a completion marker after its output. Extending the same create-if-absent
-  checkpoint contract to every user step is deferred.
+- **Completion markers (implemented narrowly)**: the sync stage publishes a
+  completion marker after the canonical episode, so a later stage or run can
+  prove the canonical it consumes was fully written for this source. Extending
+  the same create-if-absent checkpoint contract to every user step is deferred.
 - **Manifest-last publication (target)**: a build directory is sealed by
   writing its manifest once, last, so partial builds are unreachable by
   construction.
@@ -231,10 +235,10 @@ What Dyna does that HFlow defers, and what replaces it here:
 
 | Dyna mechanism | Why they need it | HFlow v1 |
 |---|---|---|
-| Joint optimizer tuning worker counts vs network/IO/DB limits | millions of concurrent runs | simple FFD bin-packing + start jitter (included); tuning deferred |
+| Joint optimizer tuning worker counts vs network/IO/DB limits | millions of concurrent runs | simple FFD bin-packing + deterministic start stagger (included); tuning deferred |
 | Production DB + CDC + analytical warehouse | 50M+ row columnar scans vs transactional load | Parquet catalog + DuckDB, same SQL interface |
 | Alluxio page-level NVMe cache + warm-before-launch orchestration | PB corpus, multi-vendor GPU clusters | out of scope; documented pointer for those who need it |
-| mmap/zero-copy manifest loading across ranks | 2 TB node RAM ceilings | docs recipe (Arrow memory-map); trivial at small scale |
+| mmap/zero-copy manifest loading across ranks | 2 TB node RAM ceilings | [docs recipe](./how-to/load-manifest-mmap.md) (Arrow memory-map); trivial at small scale |
 | Topology-aware optimizer sharding, Slurm preflight gating, Ansible fleet provisioning | training-side, week-long runs on rented fleets | out of scope; this is a data pipeline, not a trainer |
 
 A benchmark report (tracked in issues) will publish what the simple version achieves and where each limit is: storage vs per-frame JPEG (Dyna: ~68% reduction), topic-group vs default chunking read performance (Dyna: ~2.9× faster), and single-machine ingestion throughput.

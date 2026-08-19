@@ -107,7 +107,7 @@ All keys are optional; the record is copied/merged from the source recording. Re
 | `gop_seconds` | The keyframe interval actually used |
 | `source_uri` | Where the source recording came from (optional) |
 
-The corpus is assumed permanently mixed-version: curation filters by version range rather than expecting uniformity. A rewrite of an episode replaces `provenance/v1`; all other source `Metadata` records are copied through unchanged.
+The corpus is assumed permanently mixed-version: curation pins or excludes exact versions (they are content hashes, so there is no ordering to range over) rather than expecting uniformity. A rewrite of an episode replaces `provenance/v1`; all other source `Metadata` records are copied through unchanged.
 
 ## Attachments
 

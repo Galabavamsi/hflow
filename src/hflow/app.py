@@ -65,6 +65,7 @@ from hflow.storage import (
 from hflow.transform import (
     EpisodeStamps,
     TransformConfig,
+    compute_pipeline_version,
     stamps_from_provenance,
     write_canonical_episode,
 )
@@ -444,6 +445,21 @@ class App:
         return {registered.name for registered in self.checks} | {
             registered.name for registered in self.enrichments
         }
+
+    @property
+    def pipeline_version(self) -> str:
+        """The ``pipeline_version`` this App stamps onto episodes it processes.
+
+        A content hash of the transform configuration plus the registered
+        derived channels -- compare it against the catalog to find stale
+        episodes (``hflow.stale_episodes`` / ``hflow stale``). A
+        ``@app.transform`` override that computes its own derived channels
+        owns its stamps; compare against a freshly stamped episode instead.
+        """
+        return compute_pipeline_version(
+            self.transform_config,
+            {channel.topic: channel.version for channel in self.derived},
+        )
 
     def check(
         self,

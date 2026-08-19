@@ -1,6 +1,6 @@
 """Command-line entry point.
 
-Subcommands: ``curate``, ``doctor``, the Compose runtime family
+Subcommands: ``curate``, ``stale``, ``doctor``, the Compose runtime family
 ``up``/``down``/``ingest``/``status``, and ``deploy`` for bring-your-own
 Airflow. Everything the CLI does is a thin call into the library: no behavior
 lives only here.
@@ -10,7 +10,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from hflow.curation import curate
+from hflow.curation import curate, stale_episodes
 from hflow.doctor import diagnose
 from hflow.runtime._deploy import DEFAULT_DEPLOY_VENV_PYTHON
 from hflow.steps import RUN_PROFILES
@@ -55,6 +55,34 @@ def _build_parser() -> argparse.ArgumentParser:
         "-o",
         default="./data/manifest.parquet",
         help="manifest path or object-store URL (default: ./data/manifest.parquet)",
+    )
+
+    stale_parser = subparsers.add_parser(
+        "stale",
+        help="list episodes whose latest cataloged run predates the current pipeline version",
+        description=(
+            "Print the source URI of every episode whose latest cataloged run was "
+            "produced by a different pipeline (and format) version -- one per line "
+            "on stdout, ready to pipe back into `hflow ingest` for selective "
+            "reprocessing. The summary goes to stderr."
+        ),
+    )
+    stale_parser.add_argument(
+        "--catalog",
+        default="./data/catalog",
+        help="catalog directory or object-store prefix (default: ./data/catalog)",
+    )
+    stale_group = stale_parser.add_mutually_exclusive_group(required=True)
+    stale_group.add_argument(
+        "--pipeline",
+        help=(
+            "pipeline file to compute the current version from, optionally with the "
+            "App variable name: path/to/pipeline.py[:app]"
+        ),
+    )
+    stale_group.add_argument(
+        "--pipeline-version",
+        help="compare against this pipeline_version hash directly (no pipeline import)",
     )
 
     doctor_parser = subparsers.add_parser(
@@ -237,6 +265,49 @@ def _parse_pipeline_spec(pipeline_spec: str) -> tuple[Path, str]:
     return Path(pipeline_spec), "app"
 
 
+def _command_stale(arguments: argparse.Namespace) -> int:
+    schema_version: str | None = None
+    if arguments.pipeline is not None:
+        import importlib.util
+
+        from hflow.app import App
+        from hflow.format import EPISODE_FORMAT_VERSION
+
+        pipeline_file, app_variable = _parse_pipeline_spec(arguments.pipeline)
+        spec = importlib.util.spec_from_file_location("hflow_user_pipeline", pipeline_file)
+        if spec is None or spec.loader is None:
+            print(f"stale: cannot import pipeline file {pipeline_file}", file=sys.stderr)
+            return 2
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        app = getattr(module, app_variable, None)
+        if not isinstance(app, App):
+            print(
+                f"stale: {pipeline_file} has no hflow.App named {app_variable!r}",
+                file=sys.stderr,
+            )
+            return 2
+        pipeline_version = app.pipeline_version
+        # A pipeline defines the whole current target, format version included.
+        schema_version = EPISODE_FORMAT_VERSION
+    else:
+        pipeline_version = arguments.pipeline_version
+
+    stale = stale_episodes(
+        arguments.catalog,
+        pipeline_version=pipeline_version,
+        schema_version=schema_version,
+    )
+    for episode in stale:
+        print(episode.source_uri if episode.source_uri is not None else episode.uri)
+    print(
+        f"stale: {len(stale)} episode(s) behind pipeline_version {pipeline_version}"
+        + (f" / schema_version {schema_version}" if schema_version is not None else ""),
+        file=sys.stderr,
+    )
+    return 0
+
+
 def _command_up(arguments: argparse.Namespace) -> int:
     from hflow.runtime import (
         RuntimeConfig,
@@ -403,6 +474,8 @@ def main(argv: list[str] | None = None) -> int:
         report = curate(arguments.catalog, sql, output=arguments.output)
         print(report.summary())
         return 0
+    if arguments.command == "stale":
+        return _command_stale(arguments)
     if arguments.command == "doctor":
         doctor_report = diagnose(arguments.file)
         print(doctor_report.summary())

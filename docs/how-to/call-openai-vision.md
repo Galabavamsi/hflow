@@ -10,7 +10,10 @@ The complete example is
 It follows the official OpenAI
 [images and vision guide](https://developers.openai.com/api/docs/guides/images-vision):
 the image is sent to the Responses API as a base64 data URL and the text result
-is read from `response.output_text`.
+is read from `response.output_text`. The example ships two such checks: the
+activity description walked through below, and a hand-visibility check
+(Dyna's "missing/occluded hand positions" issue) that turns the model's tile
+count into a `hands_visible_fraction` measurement.
 
 ## 1. Install the optional client
 

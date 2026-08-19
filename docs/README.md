@@ -39,6 +39,8 @@ Use these when you already know the outcome you need.
 - [Run and operate the local Airflow runtime](./RUNTIME.md)
 - [Deploy into an existing Airflow environment](./RUNTIME.md#bring-your-own-airflow-hflow-deploy)
 - [Query quality evidence and create a manifest](./CATALOG.md)
+- [Find and reprocess stale episodes](./CATALOG.md#finding-stale-episodes-to-reprocess)
+- [Load a large manifest with memory mapping](./how-to/load-manifest-mmap.md)
 - [Inspect episodes in Foxglove](./how-to/inspect-episodes-in-foxglove.md)
 - [Add a native-video provider](./PROVIDERS.md)
 

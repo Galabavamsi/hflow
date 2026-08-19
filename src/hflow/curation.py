@@ -92,6 +92,17 @@ class CurationReport:
         return self.summary()
 
 
+@dataclass(frozen=True)
+class StaleEpisode:
+    """One episode whose latest cataloged run predates the current versions."""
+
+    episode_id: str
+    uri: str
+    source_uri: str | None
+    pipeline_version: str
+    schema_version: str
+
+
 def _quote_sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -244,6 +255,63 @@ def _collect_coverage(connection: duckdb.DuckDBPyConnection) -> tuple[int, list[
             total_episodes=int(total_episodes),
         )
         for check_name, episodes_ran in coverage_rows
+    ]
+
+
+def stale_episodes(
+    catalog_root: "Path | str | StorageRoot",
+    *,
+    pipeline_version: str,
+    schema_version: str | None = None,
+) -> list[StaleEpisode]:
+    """Episodes whose latest cataloged run was produced by other versions.
+
+    The selective-reprocessing half of the version-stamp story: the corpus is
+    assumed permanently mixed-version, and this lists exactly which episodes
+    are stale against the versions you pass (``App.pipeline_version`` is the
+    default source of the current one), so only those get re-ingested.
+
+    Staleness is judged per **source recording** (``source_uri``, falling
+    back to ``episode_id`` when none was recorded), on its most recent run:
+    reprocessing rewrites the canonical file and therefore mints a new
+    content-addressed ``episode_id``, so grouping by episode would keep
+    reporting every superseded canonical forever. A source already
+    reprocessed to the current versions is not stale, whatever its history
+    says.
+
+    Versions are content hashes: "stale" means *different*, never ordered
+    comparison. Feed each result's ``source_uri`` back into ingestion
+    (``hflow ingest`` / ``app.process``) to reprocess it.
+    """
+    connection = open_catalog_connection(catalog_root)
+    try:
+        predicate = "pipeline_version IS DISTINCT FROM ?"
+        parameters: list[str] = [pipeline_version]
+        if schema_version is not None:
+            predicate += " OR schema_version IS DISTINCT FROM ?"
+            parameters.append(schema_version)
+        rows = connection.execute(
+            f"""
+            SELECT episode_id, uri, source_uri, pipeline_version, schema_version FROM (
+                SELECT *, row_number() OVER (
+                    PARTITION BY coalesce(source_uri, episode_id)
+                    ORDER BY recorded_at DESC, run_fingerprint DESC
+                ) AS row_rank FROM episodes_raw
+            ) WHERE row_rank = 1 AND ({predicate}) ORDER BY episode_id
+            """,
+            parameters,
+        ).fetchall()
+    finally:
+        connection.close()
+    return [
+        StaleEpisode(
+            episode_id=str(episode_id),
+            uri=str(uri),
+            source_uri=str(source_uri) if source_uri is not None else None,
+            pipeline_version=str(stale_pipeline_version),
+            schema_version=str(stale_schema_version),
+        )
+        for episode_id, uri, source_uri, stale_pipeline_version, stale_schema_version in rows
     ]
 
 

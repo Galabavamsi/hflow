@@ -37,10 +37,12 @@ export OPENAI_MODEL="gpt-5.4-mini"
 uv run --extra openai python examples/openai_vision/pipeline.py
 ```
 
-The example synthesizes a small episode when no MCAP path is provided, sends
-one timestamped contact sheet through the Responses API, and records the
-model's answer as quality evidence. `OPENAI_BASE_URL` can point the same client
-at another endpoint that implements the Responses API.
+The example synthesizes a small episode when no MCAP path is provided and runs
+two contact-sheet checks through the Responses API: an activity description,
+and a hand-visibility fraction (Dyna's "missing/occluded hand positions"
+quality issue, answered as model evidence). Each check is one API call;
+`OPENAI_BASE_URL` can point the same client at another endpoint that
+implements the Responses API.
 
 Guide: [Call an OpenAI vision endpoint from a step](../docs/how-to/call-openai-vision.md)  
 Code: [`openai_vision/pipeline.py`](./openai_vision/pipeline.py)

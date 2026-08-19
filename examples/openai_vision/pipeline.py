@@ -21,6 +21,11 @@ ACTIVITY_PROMPT = (
     "Describe the physical activity across this timestamped sequence in one concise sentence. "
     "State when the visual evidence is insufficient."
 )
+HAND_VISIBILITY_PROMPT = (
+    "This image is a grid of {tile_count} frames sampled from an egocentric recording. "
+    "In how many of the {tile_count} frames are the operator's hands clearly visible "
+    "(not missing from view, not occluded by objects)? Answer with a single integer."
+)
 
 app = hflow.App(
     "openai-vision-example",
@@ -67,6 +72,54 @@ def describe_activity(episode: hflow.Episode) -> hflow.CheckResult:
             "activity_description": response.output_text,
             "vision_model": model_name,
             "sampled_frame_count": len(contact_sheet.tile_log_times_ns),
+        }
+    )
+
+
+@app.check(uses=OPENAI_ENDPOINT_ALIAS, version="hand-visibility-contact-sheet-v1")
+def hand_visibility(episode: hflow.Episode) -> hflow.CheckResult:
+    """Missing/occluded hand positions, one of Dyna's named quality issues.
+
+    Hand visibility is a model judgment, not a signal statistic, so it lives
+    on the VLM extension surface: sample frames, ask the model, record the
+    fraction as evidence. The keep/drop threshold stays a curation query.
+    """
+    contact_sheet = hflow.ffmpeg.contact_sheet(
+        episode.frames(fps=0.5),
+        episode.workdir / "hand-visibility-contact-sheet.jpg",
+        columns=4,
+        max_tiles=12,
+    )
+    tile_count = len(contact_sheet.tile_log_times_ns)
+    client = OpenAI(
+        api_key=os.environ["OPENAI_API_KEY"],
+        base_url=app.endpoints[OPENAI_ENDPOINT_ALIAS],
+    )
+    response = client.responses.create(
+        model=os.environ["OPENAI_MODEL"],
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": HAND_VISIBILITY_PROMPT.format(tile_count=tile_count),
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": _image_data_url(contact_sheet.path),
+                    },
+                ],
+            }
+        ],
+    )
+    answer_text = response.output_text.strip()
+    visible_tile_count = int(answer_text) if answer_text.isdigit() else 0
+    return hflow.CheckResult(
+        measurements={
+            "hands_visible_fraction": min(visible_tile_count, tile_count) / tile_count,
+            "hands_visible_raw_answer": answer_text,
+            "hands_sampled_frame_count": tile_count,
         }
     )
 

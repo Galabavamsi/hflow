@@ -20,8 +20,10 @@ from hflow.catalog import AppendResult, Catalog, CheckRunRow
 from hflow.curation import (
     CheckCoverage,
     CurationReport,
+    StaleEpisode,
     curate,
     open_catalog_connection,
+    stale_episodes,
 )
 from hflow.doctor import DiagnosticLevel, DoctorReport, Finding, diagnose
 from hflow.episode import ChannelData, Episode, ExtractedFrame
@@ -96,6 +98,7 @@ __all__ = [
     "RegisteredEnrichment",
     "ResamplePolicy",
     "Stage",
+    "StaleEpisode",
     "StorageRoot",
     "TestReport",
     "TopicInfo",
@@ -114,6 +117,7 @@ __all__ = [
     "plan_batches_from_files",
     "providers",
     "stages_for_profile",
+    "stale_episodes",
     "testing",
     "to_grid",
     "write_canonical_episode",

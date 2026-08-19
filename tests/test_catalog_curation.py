@@ -274,6 +274,98 @@ def test_cli_curate_requires_exactly_one_sql_source(tmp_path: Path) -> None:
     assert cli_main(["curate", "--catalog", str(tmp_path)]) == 2
 
 
+def test_stale_episodes_lists_only_episodes_behind_the_current_versions(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path / "catalog")
+    stale_stamps = FAKE_STAMPS
+    current_stamps = EpisodeStamps(
+        schema_version="1",
+        pipeline_version="fresh00000001",
+        ffmpeg_version="ffmpeg version test",
+        robot_software_version="sim-0.1.0",
+    )
+    behind = _fake_canonical(tmp_path, content=b"behind the current pipeline")
+    current = tmp_path / "current.canonical.mcap"
+    current.write_bytes(b"already reprocessed")
+    catalog.append_episode(
+        canonical_path=behind,
+        stamps=stale_stamps,
+        episode_metadata={},
+        check_rows=[],
+        source_uri="episodes-in/behind.mcap",
+    )
+    catalog.append_episode(
+        canonical_path=current,
+        stamps=current_stamps,
+        episode_metadata={},
+        check_rows=[],
+        source_uri="episodes-in/current.mcap",
+    )
+
+    stale = hflow.stale_episodes(
+        tmp_path / "catalog", pipeline_version=current_stamps.pipeline_version
+    )
+    assert [episode.source_uri for episode in stale] == ["episodes-in/behind.mcap"]
+    assert stale[0].pipeline_version == stale_stamps.pipeline_version
+
+    # Staleness follows the SOURCE: reprocessing behind.mcap mints a new
+    # content-addressed episode_id, and the source's latest run now carries
+    # the current stamps, so the source stops being stale.
+    reprocessed = tmp_path / "behind-reprocessed.canonical.mcap"
+    reprocessed.write_bytes(b"behind, reprocessed to current")
+    catalog.append_episode(
+        canonical_path=reprocessed,
+        stamps=current_stamps,
+        episode_metadata={},
+        check_rows=[],
+        source_uri="episodes-in/behind.mcap",
+    )
+    remaining_stale_source_uris = {
+        episode.source_uri
+        for episode in hflow.stale_episodes(
+            tmp_path / "catalog", pipeline_version=current_stamps.pipeline_version
+        )
+    }
+    assert "episodes-in/behind.mcap" not in remaining_stale_source_uris
+
+    # A schema bump makes every source stale regardless of pipeline version.
+    all_stale = hflow.stale_episodes(
+        tmp_path / "catalog",
+        pipeline_version=current_stamps.pipeline_version,
+        schema_version="2",
+    )
+    assert {episode.source_uri for episode in all_stale} == {
+        "episodes-in/behind.mcap",
+        "episodes-in/current.mcap",
+    }
+
+
+def test_cli_stale_prints_source_uris_for_ingest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    catalog = Catalog(tmp_path / "catalog")
+    catalog.append_episode(
+        canonical_path=_fake_canonical(tmp_path),
+        stamps=FAKE_STAMPS,
+        episode_metadata={},
+        check_rows=[],
+        source_uri="episodes-in/run_0001.mcap",
+    )
+    exit_code = cli_main(
+        [
+            "stale",
+            "--catalog",
+            str(tmp_path / "catalog"),
+            "--pipeline-version",
+            "somethingnewer",
+        ]
+    )
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    # stdout is exactly the pipeable URI list; the summary goes to stderr.
+    assert captured.out.splitlines() == ["episodes-in/run_0001.mcap"]
+    assert "1 episode(s)" in captured.err
+
+
 def test_append_accepts_non_json_measurement_scalars(tmp_path: Path) -> None:
     """numpy scalars are user data: they must fingerprint, not crash the append."""
     import numpy as np
