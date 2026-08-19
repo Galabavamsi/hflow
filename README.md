@@ -6,8 +6,8 @@
 
 # HFlow
 
-**An open-source, modular data pipeline for turning physical-AI data into
-quality-checked, queryable datasets for training robotics models.**
+**An open-source SDK for defining quality control pipelines for turning Physical AI data into
+quality-checked, queryable datasets for training policy models.**
 
 HFlow is reusable infrastructure for processing multimodal physical-AI data:
 human egocentric recordings, robot teleoperation demonstrations, autonomous
