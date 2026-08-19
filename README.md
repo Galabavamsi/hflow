@@ -46,11 +46,15 @@ episode.
 Human and robot data move through the same four-stage lifecycle Dyna describes:
 
 ```
-collection ──► ingestion ──────────────► curation ──────► delivery
-(landing       (transform → QC gate →    (SQL over        (curated MCAP +
+collection --> ingestion ---------------> curation ------> delivery
+(landing       (transform -> QC gate ->  (SQL over        (curated MCAP +
  bucket)        enrich, as an             episode          manifest; convert
                 Airflow DAG)              catalog)         for training)
 ```
+
+<p align="center">
+  <img src="docs/assets/hflow-readme.gif" alt="HFlow pipeline demo" width="960">
+</p>
 
 - **Your processing code stays yours.** Transformations, quality checks, labels, and enrichments are plain Python functions in your own environment. Existing code plugs in through small adapters instead of being rewritten for a proprietary framework.
 - **Episodes are MCAP**, the container that ROS 2 records natively and [Foxglove](https://foxglove.dev/)/[Rerun](https://rerun.io/) open directly, written with the two tuning ideas from Dyna's post: in-band H.264 with GOP length matched to how the data will be read, and **topic-group chunking** (camera streams and state streams never share a chunk, so a training sample costs one read per group instead of one per topic).
