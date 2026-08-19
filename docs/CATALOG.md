@@ -199,7 +199,7 @@ the same way. The only reserved file is the `format_version` marker at the
 catalog root (currently `1`); a breaking layout change bumps it, and readers
 refuse loudly on mismatch.
 
-## Current limits, stated plainly
+## Current limits
 
 - The wide `episodes` view pivots **numeric** measurements only (booleans as
   0/1). Text-valued measurements stay in the long `measurements` table;

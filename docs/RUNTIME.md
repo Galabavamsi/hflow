@@ -366,10 +366,10 @@ local storage; there is no hosted service, account, or metered anything
 behind it. The costs are ~2 GB of images plus the venv on disk, and your CPU
 while runs execute.
 
-## What this costs, honestly
+## Runtime overhead
 
 In the spirit of [the benchmark report](./BENCHMARKS.md): the runtime has a
-floor, and you should know where it is before blaming your code.
+latency floor. Know where it is before you attribute slowness to your own code.
 
 Airflow schedules tasks in *seconds*, not milliseconds. Every sub-DAG task
 also boots a fresh interpreter in your venv (the external-python isolation is

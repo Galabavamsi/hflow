@@ -6,9 +6,9 @@ The accessor surface exists because robotics QC scripts consume a small set of i
 
 ## The model: evidence, not verdicts
 
-A check returns `hflow.CheckResult`: **measurements** (named numbers/strings), **intervals** (labeled time spans), and **tags**. All of it is recorded regardless of pass or fail. Thresholds are not baked into the corpus, because quality heuristics are known to *invert* on real defects (smoothness metrics have scored an early-gripper-release defect *better* than clean demos); a stored measurement lets you re-decide with a query, a stored verdict bakes in the wrong call.
+A check returns `hflow.CheckResult`: **measurements** (named numbers/strings), **intervals** (labeled time spans), and **tags**. Every field is recorded regardless of pass or fail. Thresholds are not baked into the corpus, because quality heuristics are known to *invert* on real defects (smoothness metrics have scored an early-gripper-release defect *better* than clean demos); a stored measurement lets you re-decide with a query, a stored verdict bakes in the wrong call.
 
-A check *may* also declare a `verdict`, a boolean you compute from your own thresholds. On a check registered with `critical=True`, a `False` verdict **quarantines** the episode: it gets a `quarantined:<check>` tag and its downstream steps are skipped, so an episode with a dead camera never pays for enrichment. Quarantine is a tag, never a deletion. On a non-critical check, a `False` verdict records a `failed:<check>` tag and the run proceeds. A check that *crashes* is treated as infrastructure failure, not bad data: it is reported as an error and never recorded as a quality outcome.
+A check *may* also declare a `verdict`, a boolean you compute from your own thresholds. On a check registered with `critical=True`, a `False` verdict **quarantines** the episode: it gets a `quarantined:<check>` tag and its downstream steps are skipped, so an episode with a dead camera never runs expensive enrichment. Quarantine is a tag, never a deletion. On a non-critical check, a `False` verdict records a `failed:<check>` tag and the run proceeds. A check that *crashes* is treated as infrastructure failure, not bad data: it is reported as an error and never recorded as a quality outcome.
 
 ## The pattern
 

@@ -64,6 +64,6 @@ These pages explain why the system has its current boundaries.
 
 Every project-owned page is linked from this index. Every runnable example is
 linked from the [examples catalog](../examples/README.md), and focused how-to
-guides link to the code that implements their task. New pages should state one
+guides link to the code that implements their task. New pages must state one
 primary user goal instead of mixing a tutorial, operational recipe, API listing,
 and design essay into one narrative.

@@ -64,7 +64,7 @@ The H.264 bitstream constraints (all MUST):
 
 ### GOP presets
 
-**Dyna says** GOP length is effectively a training hyperparameter. The writer keys it to how the data will be read:
+**Dyna says** GOP length is effectively a training hyperparameter. The writer keys it to how the data is read:
 
 | Preset | Keyframe interval | Read pattern it serves |
 |---|---|---|

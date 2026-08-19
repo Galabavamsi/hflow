@@ -71,7 +71,7 @@ client, runtime lifecycle, or task-venv behavior. It pulls large images on the
 first run, starts an isolated Compose project, and removes its containers and
 volumes afterward.
 
-Tests should verify HFlow's observable business outcomes. Do not add tests
+Tests must verify HFlow's observable business outcomes. Do not add tests
 whose only purpose is to assert mock interactions or third-party library
 behavior.
 

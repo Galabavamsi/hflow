@@ -18,7 +18,7 @@ A provider is any object satisfying `hflow.providers.NativeVideoProvider`:
 | `protocol: str` | Wire-protocol identifier the payload conforms to, e.g. `"vllm-video"`. |
 | `prepare_video_request(video_path, prompt) -> dict[str, object]` | Builds the JSON-serializable request body for one video + prompt. |
 
-`prepare_video_request` returns a **payload, not a response**: the user posts it with their own HTTP client. HFlow never ships a client, providers included.
+`prepare_video_request` returns a **payload, not a response**: you post it with your own HTTP client. HFlow never ships a client, providers included.
 
 The protocol is `@runtime_checkable`, so `isinstance(obj, NativeVideoProvider)` works as a duck-check. Standard `Protocol` caveat: `isinstance` verifies the three members *exist*, not their signatures. Run a type checker over your provider package for the rest.
 
@@ -68,7 +68,7 @@ class VllmVideoProvider:
 vllm = "hflow_vllm_video.provider:VllmVideoProvider"
 ```
 
-The entry point may reference a provider **class** (it will be instantiated with no arguments) or an already-constructed module-level **instance**. Keep the entry-point name equal to the provider's `name`: discovery registers under `provider.name` and warns when the two drift.
+The entry point may reference a provider **class** (discovery instantiates it with no arguments) or an already-constructed module-level **instance**. Keep the entry-point name equal to the provider's `name`: discovery registers under `provider.name` and warns when the two drift.
 
 ## Using a provider in a check
 
@@ -97,7 +97,7 @@ def grasp_succeeded(ep: hflow.Episode) -> hflow.CheckResult:
 
 ## Stability of the entry-point group
 
-The group name `hflow.video_providers` is a fixed literal: it lives in *your* package's metadata, so it will never change silently. Any change would be a documented breaking change for plugin authors, announced in release notes.
+The group name `hflow.video_providers` is a fixed literal: it lives in *your* package's metadata, so it never changes silently. Any change would be a documented breaking change for plugin authors, announced in release notes.
 
 ## Non-goals
 

@@ -24,11 +24,11 @@ Include, when available:
 - relevant logs with tokens, credentials, private URLs, and robot data removed;
 - any mitigation you have already identified.
 
-Please do not upload proprietary robot recordings or data containing people,
-screens, badges, credentials, or customer information. A synthetic reproducer
-is strongly preferred.
+Don't upload proprietary robot recordings or data containing people,
+screens, badges, credentials, or customer information. Provide a synthetic
+reproducer instead.
 
-The maintainers will validate the report, coordinate a fix and disclosure, and
+The maintainers validate the report, coordinate a fix and disclosure, and
 credit reporters who want attribution. Response and remediation times depend
 on severity and maintainer availability; this pre-v1 project does not promise
 a fixed service-level agreement.
