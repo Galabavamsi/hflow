@@ -1,4 +1,4 @@
-# Running the pipeline
+# Run HFlow pipelines with Airflow
 
 Your pipeline already works: `app.test("episode_0001.mcap")` runs every check
 in-process, in seconds, with no Docker and no scheduler. This page is the
@@ -402,5 +402,7 @@ Two consequences to act on:
 - [Architecture](./ARCHITECTURE.md): why the runtime is provisioned, not
   imported; deployment modes; the failure taxonomy behind the gate
 - [Catalog and curation](./CATALOG.md): querying what the runs recorded
+- [How HFlow fits the robotics data stack](./INTEGRATIONS.md): the boundary
+  between HFlow, Airflow, object storage, and downstream tools
 - [`references/airflow3-notes.md`](../references/airflow3-notes.md): the
   cited Airflow 3.3.1 facts the bundle encodes

@@ -1,4 +1,4 @@
-# The catalog and curation
+# Query and curate Physical AI datasets
 
 Dyna's answer to "which episodes go in the dataset?" is a warehouse and a SQL
 query. HFlow ships the single-tenant collapse of the same interface: every
@@ -270,3 +270,7 @@ refuse loudly on mismatch.
   provenance of this design (what Dyna says vs. what we chose)
 - [Porting guide](./PORTING.md): how measurements get produced in the first
   place
+- [How HFlow fits the robotics data stack](./INTEGRATIONS.md): the boundary
+  between HFlow, Parquet, DuckDB, object storage, and training loaders
+- [Frequently asked questions](./FAQ.md): direct answers about outputs,
+  infrastructure, and project scope

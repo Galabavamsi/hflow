@@ -8,7 +8,7 @@
 
 <h1 align="center">HFlow</h1>
 
-<p align="center"><strong>Open-source SDK for building Physical AI data pipelines</strong></p>
+<p align="center"><strong>Open source SDK for building Physical AI data pipelines</strong></p>
 
 <p align="center">
   <a href="https://www.ycombinator.com/companies/hebbian-robotics">
@@ -22,7 +22,7 @@
   </a>
 </p>
 
-HFlow provides reusable infrastructure for physical-AI data pipelines. Add your
+HFlow provides reusable infrastructure for physical AI data pipelines. Add your
 existing Python transformations, quality checks, labels, and enrichments; HFlow
 handles the orchestration, storage, versioning, and curation around them.
 
@@ -51,6 +51,14 @@ episode.
 > **Status: pre-v1, with the core lifecycle working end to end.** HFlow is ready to try locally. See [what is implemented](./docs/ARCHITECTURE.md#what-is-different-from-dyna) and [open issues](https://github.com/Hebbian-Robotics/hflow/issues) for current details and remaining work.
 
 **Help advance open robotics and Physical AI.** [Contributors are welcome](./CONTRIBUTING.md), and no robot hardware is required.
+
+| | HFlow's boundary |
+| --- | --- |
+| **Input** | One multimodal episode per standard MCAP file |
+| **Processing** | Your Python transforms, checks, labels, and enrichments |
+| **Execution** | In-process for development; generated Airflow 3 DAGs for scheduled runs |
+| **Durable output** | Canonical MCAP episodes, provenance, artifacts, and a Parquet catalog |
+| **Curation** | DuckDB SQL that writes a version-pinned manifest |
 
 ## What you get
 
@@ -196,6 +204,8 @@ WHERE task = 'fold_napkin'
 ## Documentation
 
 - [Documentation home](./docs/README.md): start by task, then choose a tutorial, how-to guide, reference, or explanation
+- [Frequently asked questions](./docs/FAQ.md): formats, infrastructure, scale, project scope, and current release status
+- [How HFlow fits the robotics data stack](./docs/INTEGRATIONS.md): MCAP, Airflow, Foxglove, Rerun, DuckDB, object storage, and training formats
 - [Runnable examples](./examples/README.md): exact commands, prerequisites, expected output, and links to the relevant guides
 - [Architecture and differences from Dyna](./docs/ARCHITECTURE.md): the implemented, simplified, deferred, and out-of-scope matrix
 - [Call OpenAI vision from a step](./docs/how-to/call-openai-vision.md): a focused guide linked to a complete executable pipeline

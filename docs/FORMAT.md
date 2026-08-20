@@ -1,4 +1,4 @@
-# The canonical episode format
+# Canonical MCAP episode format
 
 **Version 1**: a convention for training-ready robot episodes in standard [MCAP](https://mcap.dev/spec).
 
@@ -136,3 +136,4 @@ a conforming file or 1 when it reports violations.
 - [MCAP specification](https://mcap.dev/spec) and [Python libraries](https://mcap.dev/docs/python/)
 - [foxglove.CompressedVideo schema](https://docs.foxglove.dev/docs/sdk/schemas/compressed-video)
 - [Architecture](./ARCHITECTURE.md): the full design this format serves, with per-decision provenance
+- [How HFlow fits the robotics data stack](./INTEGRATIONS.md)
