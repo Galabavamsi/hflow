@@ -11,6 +11,7 @@ import logging
 import sys
 from pathlib import Path
 
+from hflow import __version__
 from hflow.curation import curate, stale_episodes
 from hflow.doctor import diagnose
 from hflow.runtime._deploy import DEFAULT_DEPLOY_VENV_PYTHON
@@ -26,6 +27,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hflow",
         description="Open-source robotics data pipeline.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"hflow {__version__}",
     )
     parser.add_argument(
         "-v",
