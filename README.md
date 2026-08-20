@@ -22,18 +22,14 @@
   </a>
 </p>
 
-HFlow provides reusable infrastructure for processing multimodal physical-AI data
-(human egocentric recordings, robot teleoperation demonstrations, autonomous
-policy rollouts, and other sensor-rich episodes). The goal: anyone who
-needs to process this data should be able to plug their existing transformation,
-quality-checking, labeling, and enrichment code into one pipeline instead of
-rebuilding orchestration, artifact storage, versioning, observability, and
-curation infrastructure for every project.
+HFlow provides reusable infrastructure for physical-AI data pipelines. Add your
+existing Python transformations, quality checks, labels, and enrichments; HFlow
+handles the orchestration, storage, versioning, and curation around them.
 
-It replaces one-off processing scripts and manually assembled file lists with
-versioned episodes, observable pipeline runs, queryable quality evidence, and
-reproducible Parquet manifests. The processing logic remains ordinary Python
-owned by the user; HFlow supplies the reusable infrastructure around it.
+HFlow stamps each processed episode with its provenance, renders the pipeline
+as a graph, and records metadata and quality evidence in a queryable catalog.
+You can trace how outputs were produced, monitor every stage, and
+investigate a corpus without loading the underlying recordings.
 
 The design is an open source implementation of Dyna Robotics'
 ["Training Dyna-2 at million-hour scale, repeatably"](https://www.dyna.co/research/dyna-2-infrastructure) article,
@@ -52,7 +48,9 @@ cameras, teleoperated robots, autonomous policies, and other collection systems
 can all feed the pipeline once their data is represented as a supported MCAP
 episode.
 
-> **Status: pre-v1, core lifecycle implemented end to end.** Working today: canonical MCAP writing (topic-group chunking, in-band H.264), episode accessors, user/built-in checks and enrichments, `app.test()` (see the [runnable examples](./examples/README.md)), the Parquet catalog + DuckDB curation (`hflow curate`), selective reprocessing of stale episodes (`hflow stale`), the conformance doctor, `app.run()`/`hflow up` for a local Docker Compose Airflow 3 runtime, and `hflow deploy` for an existing Airflow 3 deployment. The local runtime's ingest DAG is integration-tested end to end: trigger via REST, process in an isolated task venv, and record rows in the catalog. See [what is different from Dyna](./docs/ARCHITECTURE.md#what-is-different-from-dyna) for the explicit implemented/simplified/deferred/out-of-scope boundary. Remaining pre-v1 work and scale paths are tracked in [issues](https://github.com/Hebbian-Robotics/hflow/issues).
+> **Status: pre-v1, with the core lifecycle working end to end.** HFlow is ready to try locally. See [what is implemented](./docs/ARCHITECTURE.md#what-is-different-from-dyna) and [open issues](https://github.com/Hebbian-Robotics/hflow/issues) for current details and remaining work.
+
+**Help advance open robotics and Physical AI.** [Contributors are welcome](./CONTRIBUTING.md), and no robot hardware is required.
 
 ## What you get
 
@@ -71,28 +69,10 @@ collection --> ingestion ---------------> curation ------> delivery
 
 - **Your processing code stays yours.** Transformations, quality checks, labels, and enrichments are plain Python functions in your own environment. Existing code plugs in through small adapters instead of being rewritten for a proprietary framework.
 - **Episodes are MCAP**, the container that ROS 2 records natively and [Foxglove](https://foxglove.dev/)/[Rerun](https://rerun.io/) open directly, written with the two tuning ideas from Dyna's post: in-band H.264 with GOP length matched to how the data is read, and **topic-group chunking** (camera streams and state streams never share a chunk, so a training sample costs one read per group instead of one per topic).
+- **Processed episodes carry their provenance.** The file itself records the schema, pipeline, and tool versions that produced it, plus its source URI when available. Catalog records connect measurements and outcomes to step versions, making it easier to trace a bad result back to its origin.
+- **The pipeline is visible as a graph.** HFlow renders Airflow DAGs so you can see how stages connect and monitor task status, logs, retries, and reruns.
 - **Quality checks produce reusable evidence.** Accessors extract the inputs existing processing code expects (numpy arrays, MP4 paths, JPEG frames), and results land as queryable measurements rather than hardcoded verdicts. Different datasets can apply different thresholds without processing the media again.
-- **Curation is a SQL query.** Every episode's measurements, tags, and version stamps live in a Parquet catalog; [DuckDB](https://duckdb.org/) queries it into a training manifest. Two experiments cut the same corpus with two queries; nothing is reprocessed and nothing is deleted.
-- **No new UIs, no obfuscation.** Episodes open in Foxglove and Rerun. Runs are watched in Airflow's own UI. The catalog is Parquet any tool can read. Every surface is a standard format or an existing open-source tool.
-
-## How it differs from Dyna
-
-HFlow preserves the workflow and standard-format boundaries from Dyna's
-post, but deliberately leaves out infrastructure whose value appears only at
-million-hour scale. In particular:
-
-- collection hardware and training-batch loading are outside this repository;
-- input is currently MCAP-only, and ingestion is explicitly triggered rather
-  than started by a bucket watcher;
-- replay is stage-level, and resource declarations do not yet route individual
-  steps across heterogeneous worker pools; and
-- the Parquet/DuckDB catalog replaces Dyna's database, CDC, and analytical
-  warehouse stack; distributed corpus caches and training-fleet orchestration
-  are out of scope.
-
-The [implementation-differences matrix](./docs/ARCHITECTURE.md#what-is-different-from-dyna)
-labels each area as implemented, simplified, deferred, or out of scope and
-explains the boundary in detail.
+- **Query the corpus without loading the recordings.** Metadata, quality measurements, tags, version stamps, and artifact locations live in the Parquet catalog. [DuckDB](https://duckdb.org/) can answer corpus-wide questions and build manifests without opening the underlying MCAP files.
 
 ## Hosting and scale
 
