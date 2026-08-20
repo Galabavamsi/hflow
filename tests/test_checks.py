@@ -131,11 +131,31 @@ def test_action_rate_matches_the_synthesized_rate(jittery_episode: hflow.Episode
 
 
 def test_content_digest_identifies_duplicate_content(tmp_path: Path) -> None:
-    spec = SyntheticEpisodeSpec(duration_s=2.0)
+    # Digest behavior is independent of camera encoding. A tiny state stream
+    # keeps this contract focused on message content instead of fixture cost.
+    spec = SyntheticEpisodeSpec(
+        duration_s=0.2,
+        cameras=(),
+        joint_hz=10.0,
+        joint_count=1,
+        black_segment=None,
+        joint_jump_at_s=None,
+        timestamp_offset_segment=None,
+    )
     first = synthesize_episode(tmp_path / "a.mcap", spec)
     duplicate = synthesize_episode(tmp_path / "b.mcap", spec)
     different = synthesize_episode(
-        tmp_path / "c.mcap", SyntheticEpisodeSpec(duration_s=2.0, joint_jump_at_s=1.0)
+        tmp_path / "c.mcap",
+        SyntheticEpisodeSpec(
+            duration_s=0.2,
+            cameras=(),
+            joint_hz=10.0,
+            joint_count=1,
+            black_segment=None,
+            joint_jump_at_s=None,
+            timestamp_offset_segment=None,
+            seed=1,
+        ),
     )
     with (
         hflow.Episode(first) as ep_a,

@@ -172,11 +172,17 @@ def recorded_data_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
     episode_specs = {
         # ~12.5% blackout: passes the gate below.
         "fold_napkin": SyntheticEpisodeSpec(
-            duration_s=4.0, task="fold_napkin", black_segment=(1.0, 1.5)
+            duration_s=1.0,
+            cameras=("wrist_cam",),
+            task="fold_napkin",
+            black_segment=(0.2, 0.35),
         ),
-        # 75% blackout: quarantined by the gate below.
+        # ~80% blackout: quarantined by the gate below.
         "pour_water": SyntheticEpisodeSpec(
-            duration_s=4.0, task="pour_water", black_segment=(0.5, 3.5)
+            duration_s=1.0,
+            cameras=("wrist_cam",),
+            task="pour_water",
+            black_segment=(0.1, 0.9),
         ),
     }
 

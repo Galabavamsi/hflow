@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 import hflow
-from hflow.testing import synthesize_episode
+from hflow.testing import SyntheticEpisodeSpec, synthesize_episode
 
 
 def check_joint_smoothness(joints: np.ndarray, rate_hz: float) -> dict[str, float]:
@@ -21,7 +21,23 @@ def check_joint_smoothness(joints: np.ndarray, rate_hz: float) -> dict[str, floa
 
 @pytest.fixture(scope="module")
 def source_episode(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    return synthesize_episode(tmp_path_factory.mktemp("e2e-source") / "episode_0001.mcap")
+    return synthesize_episode(
+        tmp_path_factory.mktemp("e2e-source") / "episode_0001.mcap",
+        SyntheticEpisodeSpec(
+            duration_s=2.0,
+            black_segment=(0.5, 0.75),
+            joint_jump_at_s=1.0,
+            timestamp_offset_segment=(1.4, 1.7),
+        ),
+    )
+
+
+@pytest.fixture(scope="module")
+def state_only_source_episode(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return synthesize_episode(
+        tmp_path_factory.mktemp("e2e-state-only-source") / "episode_0001.mcap",
+        SyntheticEpisodeSpec(duration_s=2.0, cameras=(), joint_jump_at_s=1.0),
+    )
 
 
 @pytest.fixture(scope="module")
@@ -109,7 +125,7 @@ def test_builtin_checks_found_the_injected_defects(
     assert blackout is not None
     black_pct = blackout.measurements["black_pct"]
     assert isinstance(black_pct, float)
-    # The fixture blacks out 1s of the 8s wrist stream: ~12.5% of frames.
+    # The fixture blacks out 0.25s of the 2s wrist stream: ~12.5% of frames.
     assert 5.0 < black_pct < 25.0
 
 
@@ -129,7 +145,7 @@ def test_canonical_episode_accessors(
         assert mp4.is_file() and mp4.stat().st_size > 0
 
         frames = episode.frames("overhead_cam", fps=2.0)
-        assert 12 <= len(frames) <= 17  # ~8s at 2 fps
+        assert 3 <= len(frames) <= 5  # ~2s at 2 fps
         assert frames[0].path.read_bytes()[:2] == b"\xff\xd8"
         # Frame log times map to SOURCE messages: at t=0.5s the fps filter
         # emits the frame visible then -- source frame floor(0.5 * 15) = 7,
@@ -141,7 +157,7 @@ def test_arrow_export(report_and_app: tuple[hflow.TestReport, hflow.App]) -> Non
     report, _app = report_and_app
     with hflow.Episode(report.canonical_path) as episode:
         table: Any = episode.channel("/joint_states").to_arrow()
-    assert table.num_rows == 800
+    assert table.num_rows == 200
     assert "log_time_ns" in table.column_names
     assert "position" in table.column_names
 
@@ -171,7 +187,9 @@ def test_failed_critical_verdict_quarantines_and_skips_downstream(
     assert by_name["camera_blackout"].status == "failed"
 
 
-def test_crashing_check_is_infrastructure_not_data(source_episode: Path, tmp_path: Path) -> None:
+def test_crashing_check_is_infrastructure_not_data(
+    state_only_source_episode: Path, tmp_path: Path
+) -> None:
     app = hflow.App("crashy-pipeline", data_root=tmp_path)
 
     @app.check()
@@ -182,7 +200,7 @@ def test_crashing_check_is_infrastructure_not_data(source_episode: Path, tmp_pat
     def still_runs(ep: hflow.Episode) -> hflow.CheckResult:
         return hflow.CheckResult(measurements={"ran": True})
 
-    report = app.test(source_episode, verbose=False)
+    report = app.test(state_only_source_episode, verbose=False)
     assert not report.quarantined
     by_name = {run.check.name: run for run in report.checks}
     assert by_name["exploding"].status == "error"
@@ -191,7 +209,7 @@ def test_crashing_check_is_infrastructure_not_data(source_episode: Path, tmp_pat
 
 
 def test_resource_declaring_checks_run_after_plain_ones(
-    source_episode: Path, tmp_path: Path
+    state_only_source_episode: Path, tmp_path: Path
 ) -> None:
     app = hflow.App(
         "ordered-pipeline", data_root=tmp_path, endpoints={"judge": "http://localhost:9"}
@@ -208,11 +226,13 @@ def test_resource_declaring_checks_run_after_plain_ones(
         execution_order.append("cheap")
         return hflow.CheckResult()
 
-    app.test(source_episode, verbose=False)
+    app.test(state_only_source_episode, verbose=False)
     assert execution_order == ["cheap", "expensive"]
 
 
-def test_missing_provider_alias_fails_preflight(source_episode: Path, tmp_path: Path) -> None:
+def test_missing_provider_alias_fails_preflight(
+    state_only_source_episode: Path, tmp_path: Path
+) -> None:
     app = hflow.App("misconfigured", data_root=tmp_path)
 
     @app.check(uses="judge")
@@ -220,4 +240,4 @@ def test_missing_provider_alias_fails_preflight(source_episode: Path, tmp_path: 
         return hflow.CheckResult()
 
     with pytest.raises(ValueError, match="judge"):
-        app.test(source_episode, verbose=False)
+        app.test(state_only_source_episode, verbose=False)

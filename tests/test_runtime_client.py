@@ -99,19 +99,34 @@ class _StubAirflowHandler(BaseHTTPRequestHandler):
         pass
 
 
-@pytest.fixture()
-def stub_server() -> Iterator[str]:
+def _reset_stub_airflow_state() -> None:
     _StubAirflowHandler.issued_tokens = []
     _StubAirflowHandler.requests_seen = []
     _StubAirflowHandler.healthy = True
     _StubAirflowHandler.expire_first_token = False
+
+
+@pytest.fixture(scope="module")
+def stub_server_base_url() -> Iterator[str]:
     server = ThreadingHTTPServer(("127.0.0.1", 0), _StubAirflowHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    server_thread = threading.Thread(
+        target=server.serve_forever,
+        kwargs={"poll_interval": 0.01},
+        daemon=True,
+    )
+    server_thread.start()
     try:
         yield f"http://127.0.0.1:{server.server_port}"
     finally:
         server.shutdown()
+        server.server_close()
+        server_thread.join()
+
+
+@pytest.fixture()
+def stub_server(stub_server_base_url: str) -> str:
+    _reset_stub_airflow_state()
+    return stub_server_base_url
 
 
 def test_trigger_fetches_token_once_and_sends_bearer(stub_server: str) -> None:
@@ -176,7 +191,22 @@ def test_health_parses_body_not_status(stub_server: str) -> None:
 
 
 def test_wait_until_healthy_times_out_with_last_status(stub_server: str) -> None:
+    class InstantlyAdvancingClock:
+        def __init__(self) -> None:
+            self.current_time_s = 0.0
+
+        def monotonic(self) -> float:
+            return self.current_time_s
+
+        def sleep(self, duration_s: float) -> None:
+            self.current_time_s += duration_s
+
     _StubAirflowHandler.healthy = False
     client = AirflowClient(stub_server, "airflow", "right-password")
-    with pytest.raises(TimeoutError, match="scheduler=unhealthy"):
+    instantly_advancing_clock = InstantlyAdvancingClock()
+    with (
+        pytest.MonkeyPatch.context() as monkeypatch,
+        pytest.raises(TimeoutError, match="scheduler=unhealthy"),
+    ):
+        monkeypatch.setattr("hflow.runtime._client.time", instantly_advancing_clock)
         client.wait_until_healthy(timeout_s=0.3, poll_interval_s=0.1)
