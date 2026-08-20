@@ -11,6 +11,7 @@ import yaml
 
 import hflow
 from hflow.runtime import BundlePaths, RuntimeConfig, bundle_dag_ids, render_bundle
+from hflow.runtime._bundle import infer_hflow_source
 from hflow.steps import RUN_PROFILES, Stage
 
 AIRFLOW_SERVICE_NAMES = (
@@ -172,6 +173,41 @@ def test_compose_hflow_source_mount_absent_when_unset(
     assert f"hflow_install_target='hflow=={hflow.__version__}'" in script
     assert 'pip install --no-cache-dir "$$hflow_install_target"' in script
     assert "if [ -d /opt/hflow-src ]" not in script
+
+
+def test_infer_hflow_source_ignores_wheel_venv_inside_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout_directory = tmp_path / "hflow-checkout"
+    (checkout_directory / "src" / "hflow").mkdir(parents=True)
+    (checkout_directory / "pyproject.toml").write_text('[project]\nname = "hflow"\n')
+    wheel_package_file = (
+        checkout_directory
+        / ".release-venv"
+        / "lib"
+        / "python3.11"
+        / "site-packages"
+        / "hflow"
+        / "__init__.py"
+    )
+    wheel_package_file.parent.mkdir(parents=True)
+    wheel_package_file.touch()
+    monkeypatch.setattr(hflow, "__file__", str(wheel_package_file))
+
+    assert infer_hflow_source() is None
+
+
+def test_infer_hflow_source_recognizes_imported_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout_directory = tmp_path / "hflow-checkout"
+    source_package_file = checkout_directory / "src" / "hflow" / "__init__.py"
+    source_package_file.parent.mkdir(parents=True)
+    source_package_file.touch()
+    (checkout_directory / "pyproject.toml").write_text('[project]\nname = "hflow"\n')
+    monkeypatch.setattr(hflow, "__file__", str(source_package_file))
+
+    assert infer_hflow_source() == checkout_directory
 
 
 def test_compose_depends_on_gates(config: RuntimeConfig, tmp_path: Path) -> None:

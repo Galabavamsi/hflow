@@ -571,16 +571,25 @@ def infer_hflow_source() -> Path | None:
     """The source checkout the imported ``hflow`` package lives in, if any.
 
     An editable/source install can supply its own checkout as the development
-    default. Returns ``None`` for a site-packages wheel install (no pyproject
-    above the package), which makes the runtime install the same published
-    distribution version instead.
+    default. Returns ``None`` for a site-packages wheel install, including a
+    virtual environment created inside an hflow checkout, which makes the
+    runtime install the same published distribution version instead.
     """
     import hflow
 
     package_dir = Path(hflow.__file__).resolve().parent
     for ancestor in package_dir.parents:
         pyproject = ancestor / "pyproject.toml"
-        if pyproject.is_file() and 'name = "hflow"' in pyproject.read_text():
+        source_package_directories = (ancestor / "src" / "hflow", ancestor / "hflow")
+        imported_from_checkout = any(
+            source_package_directory.resolve() == package_dir
+            for source_package_directory in source_package_directories
+        )
+        if (
+            imported_from_checkout
+            and pyproject.is_file()
+            and 'name = "hflow"' in pyproject.read_text()
+        ):
             return ancestor
     return None
 
