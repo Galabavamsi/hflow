@@ -213,9 +213,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_API_PORT,
         help=(
             "host port for the Airflow API, written into a new bundle's .env as "
-            f"API_PORT (default: {DEFAULT_API_PORT}). An existing .env is never "
-            "rewritten, so this only takes effect on a bundle that does not have "
-            "one yet"
+            f"API_PORT (default: {DEFAULT_API_PORT}, range 1-65535). An existing "
+            ".env is never rewritten, so this only takes effect on a bundle that "
+            "does not have one yet"
         ),
     )
     up_parser.add_argument(
@@ -491,14 +491,21 @@ def _command_up(arguments: argparse.Namespace) -> int:
     hflow_source = (
         arguments.hflow_source if arguments.hflow_source is not None else infer_hflow_source()
     )
-    config = RuntimeConfig(
-        pipeline_file=pipeline_file,
-        data_root=arguments.data_root,
-        app_variable=app_variable,
-        requirements_file=arguments.requirements,
-        hflow_source=hflow_source,
-        api_port=arguments.api_port,
-    )
+    try:
+        config = RuntimeConfig(
+            pipeline_file=pipeline_file,
+            data_root=arguments.data_root,
+            app_variable=app_variable,
+            requirements_file=arguments.requirements,
+            hflow_source=hflow_source,
+            api_port=arguments.api_port,
+        )
+    except ValueError as error:
+        # Its own block, not the start_runtime handler below: nothing has been
+        # rendered or started yet, so that handler's teardown advice would all
+        # be false.
+        print(f"up: {error}", file=sys.stderr)
+        return 2
     # A bucket data root has no local directory to host the bundle: ./runtime.
     default_bundle_dir = (
         Path(RUNTIME_BUNDLE_DIRECTORY_NAME)

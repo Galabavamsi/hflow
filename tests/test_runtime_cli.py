@@ -302,6 +302,75 @@ def test_up_api_port_does_not_rewrite_a_preserved_env(
     assert "API_PORT=9090" in (bundle_dir / ".env").read_text()
 
 
+def test_up_rejects_an_out_of_range_api_port_before_rendering(
+    compose_calls: list[list[str]],
+    healthy_client: None,
+    pipeline_file: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An argument error is reported as one, and nothing is left behind.
+
+    The bundle directory staying absent is the point: validation happens
+    before render_bundle, so there is no half-made bundle and no compose call
+    to explain.
+    """
+    bundle_dir = tmp_path / "runtime"
+    exit_code = main(
+        [
+            "up",
+            "--pipeline",
+            str(pipeline_file),
+            "--data-root",
+            str(tmp_path / "data"),
+            "--bundle-dir",
+            str(bundle_dir),
+            "--api-port",
+            "70000",
+        ]
+    )
+    assert exit_code == 2
+    assert not bundle_dir.exists()
+    assert compose_calls == []
+    streams = capsys.readouterr()
+    assert streams.out == ""
+    error_output = streams.err
+    assert "up: api_port 70000 is not in 1-65535" in error_output
+    assert "Traceback" not in error_output
+    assert "containers may still be running" not in error_output
+
+
+def test_up_rejects_an_out_of_range_api_port_on_an_existing_bundle(
+    compose_calls: list[list[str]],
+    healthy_client: None,
+    pipeline_file: Path,
+    tmp_path: Path,
+) -> None:
+    """The port is checked even where it could not have taken effect anyway.
+
+    An existing .env is preserved, so --api-port is inert on a bundle that
+    already has one. Validating before that is still the useful answer: the
+    alternative is accepting a port, ignoring it, and reporting success. The
+    preserved .env is left exactly as it was.
+    """
+    bundle_dir = tmp_path / "runtime"
+    common = [
+        "up",
+        "--pipeline",
+        str(pipeline_file),
+        "--data-root",
+        str(tmp_path / "data"),
+        "--bundle-dir",
+        str(bundle_dir),
+    ]
+    assert main([*common, "--api-port", "9090"]) == 0
+    calls_after_first_up = len(compose_calls)
+
+    assert main([*common, "--api-port", "70000"]) == 2
+    assert "API_PORT=9090" in (bundle_dir / ".env").read_text()
+    assert len(compose_calls) == calls_after_first_up
+
+
 def test_up_from_published_install_uses_matching_distribution(
     compose_calls: list[list[str]],
     healthy_client: None,
