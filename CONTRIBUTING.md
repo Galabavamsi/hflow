@@ -22,6 +22,19 @@ You need:
 - Docker with Compose v2 only when working on the Airflow runtime integration
 - [lychee](https://github.com/lycheeverse/lychee) when editing Markdown links
 
+## Platform support
+
+Linux and macOS both work for native development. CI runs on Linux only, so
+run the quality checks yourself before opening a pull request on macOS.
+
+Native Windows does not work: HFlow imports `fcntl` for file locking
+(`src/hflow/storage.py`), and that module does not exist on Windows, so
+`import hflow` fails before any test can run. Work inside WSL2 with an Ubuntu
+distribution instead, following the setup steps below from the WSL2 shell and
+keeping both the clone and your data root on the Linux filesystem. The
+[runtime prerequisites](./docs/RUNTIME.md#prerequisites) explain why the data
+root has to live there.
+
 Clone the repository and create the locked development environment:
 
 ```bash
