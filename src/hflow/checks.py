@@ -161,10 +161,10 @@ def joint_discontinuity(
 ) -> CheckResult:
     """Finite-difference joint velocities against a configurable limit.
 
-    Flags Dyna's "choppy joint states". Ships as measurements and intervals
-    only -- never a default reject rule: motion-smoothness heuristics are
-    known to invert on real defects (the Voxel51 result), so the threshold
-    and any verdict stay user-owned.
+    Flags the "choppy joint states" issue named in Dyna's article. Ships as
+    measurements and intervals only -- never a default reject rule:
+    motion-smoothness heuristics are known to invert on real defects (the
+    Voxel51 result), so the threshold and any verdict stay user-owned.
     """
     profile = _joint_motion_profile(episode, topic, field)
     if profile is None:

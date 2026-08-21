@@ -8,8 +8,9 @@ from hflow.batching import plan_batches, plan_batches_from_files
 
 
 def test_fixed_count_batches_are_near_equal_bytes() -> None:
-    # Widely varying sizes (the Dyna scenario): a naive round-robin would
-    # unbalance workers badly; least-loaded keeps spread within one item.
+    # Widely varying sizes (the scenario in Dyna's article): a naive
+    # round-robin would unbalance workers badly; least-loaded keeps spread
+    # within one item.
     item_sizes = {
         f"ep{index:02d}": size
         for index, size in enumerate([900, 850, 500, 400, 300, 250, 200, 150, 100, 50])

@@ -1,4 +1,4 @@
-"""Run profiles: Figure 4's toggleable stages driven through App.process."""
+"""Run profiles: the ingest stage graph's toggleable stages driven through App.process."""
 
 from pathlib import Path
 

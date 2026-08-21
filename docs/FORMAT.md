@@ -4,7 +4,11 @@
 
 A *canonical episode* is one MCAP file, one episode: cameras stored as in-band H.264 video, state streams preserved verbatim, semantics and version stamps carried in-file. It is what the HFlow transform writes and what the rest of the pipeline (checks, catalog, curation) consumes. This page is normative: a third party should be able to implement a conforming writer from it without reading HFlow's code.
 
-Provenance, per this repo's convention: the two load-bearing ideas (GOP length matched to the read pattern, and topic-group chunking) are **Dyna says** (measured and described in [Training Dyna-2 at million-hour scale, repeatably](https://www.dyna.co/research/dyna-2-infrastructure)). Everything the blog leaves open (the video schema, where stamps live, the codec, the numbers) is **HFlow chooses**, marked below.
+Two load-bearing ideas here -- GOP length matched to the read pattern, and topic-group
+chunking -- are measured at million-hour scale in Dyna Robotics'
+[Training Dyna-2 at million-hour scale, repeatably](https://www.dyna.co/research/dyna-2-infrastructure);
+the sections below cite the article where a mechanism or measurement comes from it. Everything
+else (the video schema, where stamps live, the codec, the numbers) is HFlow's own choice.
 
 The single overriding rule: **a canonical episode is spec-conforming MCAP.** Every convention here constrains *how* the file is written, never *what format* it is. Any conforming MCAP reader reads these files unmodified.
 
@@ -18,7 +22,10 @@ The single overriding rule: **a canonical episode is spec-conforming MCAP.** Eve
 
 ## Topic-group chunking
 
-**Dyna says**: default MCAP writing gives each topic its own chunks, so one training sample costs a read per topic. Grouping topics that share a read pattern into shared, time-major chunk streams made a sample cost one read per *group* (~3.4× fewer chunk fetches, ~2.9× faster reads at their scale).
+Default MCAP writing gives each topic its own chunks, so one training sample costs a read per
+topic. A canonical episode instead groups topics that share a read pattern into shared,
+time-major chunk streams, so a sample costs one read per *group*; Dyna's article measured this
+layout change at ~3.4× fewer chunk fetches and ~2.9× faster reads at their scale.
 
 **The rule**: every channel is assigned to exactly one named *group*. Messages from channels in different groups MUST NOT share a chunk. Within a group, messages are written time-major (ascending `log_time` across all of the group's channels interleaved), and the group's chunks form their own sequence with non-decreasing time ranges.
 
@@ -39,7 +46,10 @@ Chunking changes write order, not the format.
 
 ## In-band video
 
-**Dyna says**: moving from per-frame JPEG to H.264 with GOP length matched to the read pattern cut storage ~68%, and native visualization was a stated requirement. **HFlow chooses** how the H.264 sits in the file:
+The transform re-encodes per-frame JPEG cameras to in-band H.264 with GOP length matched to
+the read pattern, without giving up native visualization (Dyna's article reports ~68% storage
+reduction from the same move at their scale). How the H.264 sits in the file is HFlow's own
+convention:
 
 Camera streams are messages of [`foxglove.CompressedVideo`](https://docs.foxglove.dev/docs/sdk/schemas/compressed-video), protobuf-encoded:
 
@@ -64,7 +74,8 @@ The H.264 bitstream constraints (all MUST):
 
 ### GOP presets
 
-**Dyna says** GOP length is effectively a training hyperparameter. The writer keys it to how the data is read:
+GOP length is effectively a training hyperparameter, as Dyna's article observes. The writer keys
+it to how the data is read:
 
 | Preset | Keyframe interval | Read pattern it serves |
 |---|---|---|
@@ -81,7 +92,11 @@ Raw uncompressed image channels (`sensor_msgs/msg/Image`, `foxglove.RawImage`) a
 
 ## Metadata records
 
-**Dyna says** (verbatim): "Every processed episode also carries a stamp of what produced it: the schema version, the ingestion pipeline version, and the software version running on the robot when it was recorded." **HFlow chooses** MCAP `Metadata` records as where stamps and episode semantics live, keeping the episode self-contained and viewer-inspectable. All values are strings.
+Version stamps and episode semantics live in MCAP `Metadata` records, keeping the episode
+self-contained and viewer-inspectable. The stamp requirement is the one Dyna's article states:
+"Every processed episode also carries a stamp of what produced it: the schema version, the
+ingestion pipeline version, and the software version running on the robot when it was recorded."
+All values are strings.
 
 ### `episode/v1`: what this episode is
 
@@ -133,8 +148,9 @@ conform or 1 when any reports violations.
 
 ## References
 
-- Dyna Robotics, [Training Dyna-2 at million-hour scale, repeatably](https://www.dyna.co/research/dyna-2-infrastructure) (the primary source)
+- Dyna Robotics, [Training Dyna-2 at million-hour scale, repeatably](https://www.dyna.co/research/dyna-2-infrastructure)
+  (inspiration for this release; cited above where a mechanism or measurement comes from it)
 - [MCAP specification](https://mcap.dev/spec) and [Python libraries](https://mcap.dev/docs/python/)
 - [foxglove.CompressedVideo schema](https://docs.foxglove.dev/docs/sdk/schemas/compressed-video)
-- [Architecture](./ARCHITECTURE.md): the full design this format serves, with per-decision provenance
+- [Architecture](./ARCHITECTURE.md): the full design this format serves
 - [How HFlow fits the robotics data stack](./INTEGRATIONS.md)

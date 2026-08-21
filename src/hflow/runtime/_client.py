@@ -294,7 +294,7 @@ class AirflowClient:
 
         ``profile`` names a run profile (the master validates it against the
         vocabulary baked from ``hflow.steps.RUN_PROFILES`` and triggers
-        only the enabled stage sub-DAGs). ``online`` selects Figure 4's
+        only the enabled stage sub-DAGs). ``online`` selects the
         latency-first trigger lane -- the sub-DAGs process the uris as one
         immediate batch, no bin-packing, no stagger -- instead of the default
         staggered batch lane. Supply ``dag_run_id`` when the caller may retry

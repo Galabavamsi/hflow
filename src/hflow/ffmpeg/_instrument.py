@@ -11,9 +11,9 @@ missing ``lavfi.signalstats.YAVG``, a NaN, or an unparsable line is an error
 (``InstrumentParseError``), never a silent gap -- a measuring instrument that
 sometimes skips frames is worse than one that fails loudly.
 
-Covers Dyna's "camera blackout" and "bad frames" named issues. Deliberately
-no blurdetect: it inverts on motion smear (fast, good manipulation looks
-"blurry"). Thresholds are exposed and user-owned.
+Covers the "camera blackout" and "bad frames" issues named in Dyna's
+article. Deliberately no blurdetect: it inverts on motion smear (fast, good
+manipulation looks "blurry"). Thresholds are exposed and user-owned.
 """
 
 import itertools

@@ -1,8 +1,7 @@
 """hflow: an open-source robotics data pipeline.
 
 Ingest, quality-check, enrich, and curate robot episode data. See README.md
-and docs/ARCHITECTURE.md; the primary source is Dyna Robotics'
-"Training Dyna-2 at million-hour scale, repeatably".
+for orientation and docs/ARCHITECTURE.md for the design and its references.
 """
 
 from importlib.metadata import PackageNotFoundError, version

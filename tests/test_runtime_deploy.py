@@ -47,7 +47,8 @@ def test_bundle_layout_and_paths(config: DeployConfig, tmp_path: Path) -> None:
     # Every DAG file is named after its dag id (platforms sync whole dags/
     # folders, so generic names would collide across pipelines).
     assert paths.dag_file == paths.output_dir / "dags" / "my_pipeline_ingest.py"
-    # Figure 4: the master plus its four stage sub-DAGs, five files total.
+    # The ingest stage graph: the master plus its four stage sub-DAGs, five
+    # files total.
     assert paths.sub_dag_files == tuple(
         paths.output_dir / "dags" / f"my_pipeline_{stage.value}.py" for stage in Stage
     )
@@ -208,8 +209,8 @@ def test_deploy_md_contents(config: DeployConfig, tmp_path: Path) -> None:
     assert DEFAULT_DEPLOY_VENV_PYTHON in deploy_md
     assert DATA_ROOT_PATH in deploy_md
     assert "Absolute paths must be mounted identically" in deploy_md
-    # Figure 4: the master's profile/mode conf, the sub-DAG list, and the
-    # Airflow-side requirement for the master's trigger tasks.
+    # The stage graph: the master's profile/mode conf, the sub-DAG list, and
+    # the Airflow-side requirement for the master's trigger tasks.
     for sub_stage in ("sync", "meta", "labels", "media"):
         assert f"my_pipeline_{sub_stage}.py" in deploy_md
     assert '"full" | "metadata_backfill" | "relabel"' in deploy_md

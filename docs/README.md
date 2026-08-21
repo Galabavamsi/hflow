@@ -20,7 +20,7 @@ and tradeoffs.
 - **Run a pipeline locally:** follow the
   [five-minute quickstart](../examples/README.md#five-minute-quickstart).
 - **Understand the project first:** read the [architecture](./ARCHITECTURE.md),
-  especially [what differs from Dyna](./ARCHITECTURE.md#what-is-different-from-dyna).
+  especially [what is implemented](./ARCHITECTURE.md#implementation-status).
 - **Bring existing processing code:** use the [porting guide](./PORTING.md).
 - **Schedule a working pipeline:** continue with the [runtime guide](./RUNTIME.md).
 - **Find code you can run:** browse the [examples catalog](../examples/README.md).
@@ -67,7 +67,7 @@ contracts.
 
 These pages explain why the system has its current boundaries.
 
-- [Architecture and differences from Dyna](./ARCHITECTURE.md)
+- [Architecture and implementation status](./ARCHITECTURE.md)
 - [Hosting HFlow: the data-plane contract for operating workspaces for others](./HOSTING.md)
 - [Benchmark methodology and scale limits](./BENCHMARKS.md)
 - [Why steps use ordinary Python and small adapters](./PORTING.md#the-pattern)

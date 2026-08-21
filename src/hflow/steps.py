@@ -35,7 +35,7 @@ VersionIdentityValue: TypeAlias = (
 
 
 class Stage(StrEnum):
-    """Figure 4's toggleable sub-DAGs, as stage names shared with the DAGs.
+    """The ingest stage graph's toggleable sub-DAGs, as stage names shared with the DAGs.
 
     These strings are conf vocabulary: the master DAG resolves a run profile
     to a stage set and triggers only the sub-DAGs it names, and
@@ -62,7 +62,7 @@ class IngestMode(StrEnum):
     ONLINE = "online"  # latency-first: one immediate batch, no stagger
 
 
-# Run profiles: the same graph with different sub-DAGs enabled (Figure 4).
+# Run profiles: the same stage graph with different sub-DAGs enabled.
 RUN_PROFILES: dict[str, frozenset[Stage]] = {
     "full": frozenset(Stage),
     "metadata_backfill": frozenset({Stage.META}),
@@ -129,10 +129,11 @@ CheckFunction = Callable[["Episode"], CheckResult]
 class EnrichmentResult:
     """What an enrichment returns: derived labels and artifacts, no verdicts.
 
-    Enrichments are the blog's third stage family ("performance labels, video
-    captions, segmentations"). They never gate anything -- gate semantics
-    belong to critical checks -- and they never run on a quarantined episode
-    (no enrichment spend on an episode with a dead camera).
+    Enrichments are the "Labels & artifacts" stage family: performance
+    labels, video captions, segmentations (the examples named in Dyna's
+    article). They never gate anything -- gate semantics belong to critical
+    checks -- and they never run on a quarantined episode (no enrichment
+    spend on an episode with a dead camera).
 
     :param labels: Derived facts (captions, scores); recorded exactly like
         check measurements, so they are catalog columns at curation time.

@@ -10,7 +10,7 @@ re-implementing semantics by copying template text. (Bundles pin
 ``hflow==<renderer's version>``, so a rendered DAG and the library it calls
 can never skew.)
 
-Budget semantics (Dyna's mass-failure gates): a run tolerates up to
+Budget semantics (the mass-failure gates): a run tolerates up to
 ``max(8, ceil(1% of total))`` failures of a kind; checks decide quarantine,
 so the quarantine budget applies only in the meta stage, and a run where
 EVERY episode errored always fails regardless of budget.
@@ -127,9 +127,9 @@ def plan_stage_batches(
 ) -> list[PlannedStageBatch]:
     """Bin-pack uris into staggered batches; ``online`` is one immediate batch.
 
-    The online lane (Figure 4) is latency-first: one run per episode as it
-    lands -- no batching, no stagger, ``batch_count`` ignored. Returns plain
-    JSON-able dicts because the result crosses task (XCom) boundaries.
+    The online lane is latency-first: one run per episode as it lands -- no
+    batching, no stagger, ``batch_count`` ignored. Returns plain JSON-able
+    dicts because the result crosses task (XCom) boundaries.
     """
     try:
         # Parse the conf string at this boundary; steps.IngestMode owns the

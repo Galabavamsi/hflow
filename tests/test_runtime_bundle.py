@@ -54,7 +54,8 @@ def test_bundle_layout_and_paths(config: RuntimeConfig, tmp_path: Path) -> None:
     assert paths.env_file == paths.bundle_dir / ".env"
     assert paths.dag_file == paths.bundle_dir / "dags" / "ingest.py"
     assert paths.user_dir == paths.bundle_dir / "user"
-    # Figure 4: the master plus its four stage sub-DAGs, five files total.
+    # The ingest stage graph: the master plus its four stage sub-DAGs, five
+    # files total.
     assert paths.sub_dag_files == tuple(
         paths.bundle_dir / "dags" / f"ingest_{stage.value}.py" for stage in Stage
     )
@@ -429,7 +430,7 @@ def test_sub_dag_sources_compile_and_encode_contract(config: RuntimeConfig, tmp_
         assert "load_pipeline_application" in dag_source
         assert "resolve_user_pipeline_path('my_pipeline.py')" in dag_source
         assert 'load_pipeline_application(pipeline_path, "app")' in dag_source
-        # Each sub-DAG runs exactly its own Figure 4 stage.
+        # Each sub-DAG runs exactly its own stage of the stage graph.
         assert f'process_stage_batch(app, batch["items"], "{stage.value}")' in dag_source
         # The stagger, mapped batches, and budget gate are one contract.
         assert 'time.sleep(float(batch["start_delay_s"]))' in dag_source

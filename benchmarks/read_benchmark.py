@@ -1,15 +1,16 @@
 """Benchmark (issue #27): chunk layout vs read cost, three layouts, two patterns.
 
-Reproduces panels 2-3 of the Dyna blog's Figure 3 at honest small scale.
-**Dyna says**: default MCAP writing gives each topic its own chunks, so one
-training sample costs a read per topic; grouping topics by read pattern
-(cameras time-major in one chunk stream, proprioception+actions in another)
-made samples cost one read per *group* -- ~3.4x fewer fetches, ~2.9x faster
-at their scale on object storage.
+Measures the chunk-layout effect at honest small scale, alongside the
+results Dyna's article reports (its Figure 3, panels 2-3). Default MCAP
+writing gives each topic its own chunks, so one training sample costs a
+read per topic; grouping topics by read pattern (cameras time-major in one
+chunk stream, proprioception+actions in another) makes samples cost one
+read per *group* -- Dyna's article reports ~3.4x fewer fetches and ~2.9x
+faster reads at their scale on object storage.
 
 Layouts compared (identical message content):
 
-- **per-topic**: every topic its own chunk stream (the blog's default).
+- **per-topic**: every topic its own chunk stream (Dyna's baseline).
 - **interleaved**: the stock Python writer's single chunk builder (all
   topics share every chunk) -- included because it is what most tooling
   writes today.
@@ -18,7 +19,7 @@ Layouts compared (identical message content):
 Access patterns measured for each layout:
 
 - **training sample**: a random 1-second window reading ALL cameras plus
-  ``/joint_states`` (multi-view sample, the blog's framing).
+  ``/joint_states`` (a multi-view sample).
 - **state-only scan**: the whole ``/joint_states`` stream and nothing else
   (a curation/QC pass).
 
@@ -301,7 +302,7 @@ def _measure_source(
     ] * 10
 
     layouts = [
-        ("per-topic (blog's default)", per_topic_path),
+        ("per-topic (Dyna's baseline)", per_topic_path),
         ("interleaved (stock python writer)", interleaved_path),
         ("topic-group (ours)", grouped_path),
     ]

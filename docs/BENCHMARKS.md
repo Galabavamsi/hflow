@@ -44,8 +44,9 @@ uv run python benchmarks/read_benchmark.py --input nuscenes-mini-sample.mcap \
   not an object-storage round trip. Wall-clock ratios here therefore
   *understate* the benefit that matters on S3/GCS; the fetch and
   bytes-fetched counts are layout facts and transfer directly.
-- Scale: 19-60 s episodes, not forty-three million. The point is that the
-  mechanisms behave as the blog describes, not that the ratios match.
+- Scale: 19-60 s episodes, not the forty-three million of Dyna's corpus. The
+  point is that the mechanisms behave as Dyna's article describes, not that
+  the ratios match.
 - Storage reductions compare **video payload bytes** (the codec effect, the
   number comparable to Dyna's ~68%). File sizes are shown alongside but carry
   every non-camera channel passed through byte-for-byte; on a lidar-heavy
@@ -53,10 +54,11 @@ uv run python benchmarks/read_benchmark.py --input nuscenes-mini-sample.mcap \
 
 ## Storage: per-frame JPEG vs canonical MCAP by GOP preset (issue #26)
 
-**Dyna says**: moving from H5-holding-per-frame-JPEG to in-band H.264 with
-GOP length matched to the read pattern cut storage ~68%.
+HFlow's transform re-encodes per-frame JPEG into in-band H.264 with GOP
+length matched to the read pattern. Dyna's article reports that the same
+move (from H5 holding per-frame JPEG) cut their storage ~68%.
 
-**HFlow measures** (30 s synthetic episode, 2 cameras @ 15 Hz, 320x240,
+**Measured** (30 s synthetic episode, 2 cameras @ 15 Hz, 320x240,
 zstd chunks; baseline = the sum of the JPEG payload bytes, i.e. the storage
 floor of any per-frame-JPEG layout; reduction = canonical video payload vs
 that baseline):
@@ -83,15 +85,16 @@ Observations:
 
 ## Reads: chunk fetches and throughput by chunk layout (issue #27)
 
-**Dyna says**: default MCAP writing gives each topic its own chunks, so one
-training sample costs a read per topic; writing topic *groups* time-major
-(cameras in one chunk stream, proprioception+actions in another) made a
-sample cost one read per group: ~3.4x fewer chunk fetches and ~2.9x faster
-reads at their scale.
+Default MCAP writing gives each topic its own chunks, so one training sample
+costs a read per topic. HFlow's writer instead lays out topic *groups*
+time-major (cameras in one chunk stream, proprioception+actions in another),
+so a sample costs one read per group; Dyna's article reports ~3.4x fewer
+chunk fetches and ~2.9x faster reads from the same layout change at their
+scale.
 
-**HFlow measures** three layouts holding identical messages (60 s episode,
+**Measured**: three layouts holding identical messages (60 s episode,
 4 cameras @ 15 Hz + `/joint_states` @ 100 Hz, 800 KB chunks, same stock
-reader): **per-topic** (the blog's default), **interleaved** (the stock
+reader): **per-topic** (Dyna's baseline), **interleaved** (the stock
 Python writer's single chunk builder, what most tooling writes today), and
 **topic-group** (ours).
 
@@ -100,7 +103,7 @@ state):
 
 | layout | fetches/sample | compressed MB fetched/sample | wall-clock (local) |
 |---|---|---|---|
-| per-topic (blog's default) | 5.04 | 0.963 | 2251 ms |
+| per-topic (Dyna's baseline) | 5.04 | 0.963 | 2251 ms |
 | interleaved (stock python writer) | 1.11 | 0.537 | 821 ms |
 | topic-group (ours) | **2.08** | 0.830 | 1508 ms |
 
@@ -109,23 +112,23 @@ pattern, x10):
 
 | layout | fetches/scan | compressed MB fetched/scan | wall-clock (local) |
 |---|---|---|---|
-| per-topic (blog's default) | 3.00 | 0.437 | 310 ms |
+| per-topic (Dyna's baseline) | 3.00 | 0.437 | 310 ms |
 | interleaved (stock python writer) | 6.00 | 2.889 | 363 ms |
 | topic-group (ours) | **3.00** | **0.437** | 302 ms |
 
 Observations:
 
-- Against the blog's per-topic default, topic-group chunking gives **2.42x
+- Against Dyna's per-topic baseline, topic-group chunking gives **2.42x
   fewer fetches** and 1.49x faster local reads on training samples. The
   arithmetic ceiling at 4 cameras + 1 state topic is (4+1)/2 = 2.5x, and the
   measurement sits on it; Dyna's 3.4x implies more topics per sample at
-  their scale, exactly the blog's "adding a camera no longer adds a round
-  trip".
+  their scale, exactly their article's "adding a camera no longer adds a
+  round trip".
 - The interleaved layout is *best* on full multi-view samples (every byte in
   its chunks is needed) but pays 6.6x the bytes and 2x the fetches the
   moment a read is selective: the state-only scan drags the entire video
   stream through the reader. Topic-group is the only layout that is near-best
-  under **both** access patterns, which is the actual claim being reproduced:
+  under **both** access patterns, which is the actual claim under test:
   read layouts are tuned per consumer, and a corpus serves more than one
   consumer.
 - Local wall-clock tracks bytes-decompressed, not round trips; on object
@@ -177,8 +180,8 @@ everything-else) blindly, and it made reads *worse* than per-topic: this
 recording's "everything else" is ~300 MB of point clouds and diagnostics, so
 `/imu` shared chunks with lidar and a full `/imu` scan dragged **230 MB**
 through the reader (vs 0.2 MB per-topic), while training samples fetched
-37.5 chunks/sample vs per-topic's 12.9. The lesson is the blog's own
-instruction read carefully: group topics that **share a read pattern**.
+37.5 chunks/sample vs per-topic's 12.9. The lesson is the instruction in
+Dyna's article read carefully: group topics that **share a read pattern**.
 Grouping is not a schema decision, and `TransformConfig.topic_groups` exists
 precisely to say so. The benchmark's `--grouping read-pattern` mode assigns
 bulk modalities (mean message size > 16 KB) to their own group; the default
@@ -189,9 +192,9 @@ cameras + `/imu`):
 
 | chunk size | layout | fetches/sample | compressed MB fetched/sample |
 |---|---|---|---|
-| 800 KB | per-topic (blog's default) | 12.93 | 10.14 |
+| 800 KB | per-topic (Dyna's baseline) | 12.93 | 10.14 |
 | 800 KB | topic-group (read-pattern) | **9.17** | **6.65** |
-| 8 MB | per-topic (blog's default) | 7.56 | 49.26 |
+| 8 MB | per-topic (Dyna's baseline) | 7.56 | 49.26 |
 | 8 MB | topic-group (read-pattern) | **2.69** | **15.34** |
 
 Observations:
@@ -201,7 +204,7 @@ Observations:
   byte-bound, not layout-bound, and grouping buys only 1.41x. Chunk size is a
   tuned parameter (docs/ARCHITECTURE.md); at 8 MB chunks the layout effect
   dominates: **2.81x fewer fetches and 3.21x fewer bytes** than the per-topic
-  default, against Dyna's ~3.4x with more topics per sample.
+  baseline, against Dyna's ~3.4x with more topics per sample.
 - The `/imu` scan under read-pattern grouping fetches 4 MB (vs 230 MB
   naive-grouped, 322-344 MB interleaved); per-topic remains the optimum for
   single-topic scans, as always.

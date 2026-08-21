@@ -117,9 +117,9 @@ def _resolve_data_root(data_root: "Path | str | StorageRoot | None") -> "Path | 
     return environment_data_root if environment_data_root else DEFAULT_DATA_ROOT
 
 
-# Figure 4's "Media" sub-DAG collapsed to its v1 built-in: one contact sheet
-# per camera topic, recorded exactly like an enrichment so its catalog rows
-# flow through CheckRunRow like everything else.
+# The ingest stage graph's "Media" sub-DAG collapsed to its v1 built-in: one
+# contact sheet per camera topic, recorded exactly like an enrichment so its
+# catalog rows flow through CheckRunRow like everything else.
 MEDIA_CONTACT_SHEET_STEP_NAME = "media/contact_sheet"
 _MEDIA_CONTACT_SHEET_FPS = 0.5
 _SYNC_COMPLETION_MARKER_NAME = ".sync-complete.json"
@@ -366,7 +366,7 @@ class TestReport:
         )
 
     def _stages_line(self) -> str:
-        # Stage members in declaration order (Figure 4's left-to-right order).
+        # Stage members in stage-graph order (declaration order).
         ordered_stage_names = [stage.value for stage in Stage if stage in self.stages_run]
         stage_list = ", ".join(ordered_stage_names) if ordered_stage_names else "(none)"
         matching_profiles = [
@@ -613,7 +613,7 @@ class App:
         """Register an enrichment. See ``hflow.steps.EnrichmentResult``.
 
         Enrichments run after every check and never on a quarantined episode
-        (Dyna's gate semantics: no enrichment spend on bad data).
+        (the gate semantics: no enrichment spend on bad data).
         """
 
         def register(function: EnrichmentFunction) -> EnrichmentFunction:
@@ -920,10 +920,11 @@ class App:
         record: bool = True,
         stages: Iterable[Stage] | str | None = None,
     ) -> TestReport:
-        """Process one episode through the enabled Figure 4 stages: transform
-        to canonical (``sync``), run checks with gate semantics (``meta``),
-        run enrichments (``labels``), render derived media (``media``), and
-        record whatever the enabled stages produced to the catalog.
+        """Process one episode through the enabled stages of the stage
+        graph: transform to canonical (``sync``), run checks with gate
+        semantics (``meta``), run enrichments (``labels``), render derived
+        media (``media``), and record whatever the enabled stages produced
+        to the catalog.
 
         This is the operation the ingest DAG maps over episodes;
         :meth:`test` wraps it for the dev loop. Outputs land under

@@ -96,15 +96,16 @@ dataloaders are outside this repository.
 A downstream converter to a training-oriented format such as LeRobot may be a
 separate package; HFlow's core boundaries remain MCAP and Parquet.
 
-## Is HFlow Dyna Robotics' source code?
+## How does HFlow relate to Dyna Robotics' article?
 
-No. HFlow is an independent, open-source implementation of public ideas from
-Dyna Robotics' article
-[Training Dyna-2 at million-hour scale, repeatably](https://www.dyna.co/research/dyna-2-infrastructure).
-It is not Dyna's private source code, a complete reproduction of its production
-stack, or a claim of wire compatibility with unpublished systems.
+The architecture was inspired by Dyna Robotics'
+[Training Dyna-2 at million-hour scale, repeatably](https://www.dyna.co/research/dyna-2-infrastructure)
+(Aug 2026), and the docs cite the article wherever a mechanism or measurement
+comes from it. HFlow is an independent project: not affiliated with Dyna,
+containing none of their code, and claiming no compatibility with their
+internal systems.
 
-The [architecture comparison](./ARCHITECTURE.md#what-is-different-from-dyna)
+The [implementation status](./ARCHITECTURE.md#implementation-status) matrix
 marks what is implemented, simplified, deferred, and out of scope.
 
 ## Is HFlow ready for million-hour deployments?
@@ -113,7 +114,7 @@ No such claim is made. HFlow is pre-v1 and designed to make the useful workflow
 available at single-tenant, small-to-moderate scale while keeping standard
 boundaries that leave room to scale. The
 [benchmark report](./BENCHMARKS.md) publishes measured results without
-extrapolating them to Dyna's production scale.
+extrapolating them to million-hour production scale.
 
 ## Where can HFlow store data?
 

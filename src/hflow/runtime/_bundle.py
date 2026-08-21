@@ -18,7 +18,7 @@ Bundle contents:
 - ``.env`` -- generated secrets (JWT secret, admin password unless supplied),
   image tags, UID. Regenerating a bundle NEVER overwrites an existing .env
   (create-if-absent: secrets survive re-renders).
-- ``dags/`` -- the FIVE generated DAG files (Dyna Figure 4): the master
+- ``dags/`` -- the FIVE generated DAG files (the ingest stage graph): the master
   ``ingest.py`` plus the four sub-DAGs ``ingest_sync.py`` / ``ingest_meta.py``
   / ``ingest_labels.py`` / ``ingest_media.py`` (see below).
 - ``user/`` -- a copy of the user's pipeline file and requirements, mounted
@@ -30,7 +30,7 @@ Bundle contents:
   only when the requirements/hflow-source content hash changes (a marker
   file inside the volume is the checkpoint).
 
-The master DAG (Figure 4's top graph) runs entirely in Airflow's own
+The master DAG (the stage graph's master half) runs entirely in Airflow's own
 environment: a plain ``@task`` resolves the run profile against a dict
 literal baked from :data:`hflow.steps.RUN_PROFILES` at render time; each
 stage's ``TriggerDagRunOperator`` sits behind an ``enabled_<stage>`` gate
@@ -218,7 +218,8 @@ class BundlePaths:
     """Where render_bundle put things.
 
     ``dag_file`` is the MASTER DAG (``dags/ingest.py``; ``dag_id`` is its id);
-    ``sub_dag_files`` are the four stage sub-DAG files in Figure 4 order.
+    ``sub_dag_files`` are the four stage sub-DAG files in stage-graph order
+    (declaration order).
     """
 
     bundle_dir: Path
@@ -466,7 +467,8 @@ def warn_if_pipeline_data_root_differs(
             )
 
 
-# Figure 4's sub-DAG display names, in the blog figure's own words.
+# The stage sub-DAG display names shown in the Airflow UI (the same stage
+# vocabulary Dyna's article uses for this graph).
 STAGE_TITLES: dict[Stage, str] = {
     Stage.SYNC: "Transform & sync",
     Stage.META: "Metadata",
@@ -477,7 +479,7 @@ STAGE_TITLES: dict[Stage, str] = {
 # One-line stage purposes, shown in the Airflow UI (DAG-list description and
 # each sub-DAG's doc_md). One owner for the demo-facing vocabulary.
 STAGE_DESCRIPTIONS: dict[Stage, str] = {
-    Stage.SYNC: "Canonical transform -- the critical path (Figure 4: Transform & sync).",
+    Stage.SYNC: "Canonical transform -- the critical path.",
     Stage.META: "Quality checks + catalog registration, with the run's quarantine budget.",
     Stage.LABELS: "Enrichments -- non-critical, failure isolated.",
     Stage.MEDIA: "Derived media: per-camera contact sheets recorded as catalog artifacts.",
@@ -501,7 +503,8 @@ def sub_dag_id_for_stage(master_dag_id: str, stage: Stage) -> str:
 
 
 def bundle_dag_ids(master_dag_id: str) -> list[str]:
-    """All five generated DAG ids: the master first, then Figure 4's stages."""
+    """All five generated DAG ids: the master first, then the stages in
+    declaration order."""
     return [
         master_dag_id,
         *(sub_dag_id_for_stage(master_dag_id, stage) for stage in Stage),
@@ -536,8 +539,8 @@ def _run_profiles_literal() -> str:
     Baked into the master DAG at render time so the master runs without
     importing hflow (it executes in Airflow's own environment); steps.py
     stays the one owner of the vocabulary -- the baked copy is generated code
-    refreshed on every re-render. Stage names keep declaration order (Figure
-    4's left-to-right order).
+    refreshed on every re-render. Stage names keep stage-graph order
+    (declaration order).
     """
     profile_lines = ["{"]
     for profile_name, profile_stages in RUN_PROFILES.items():
@@ -563,7 +566,7 @@ def _profile_table_markdown_rows() -> str:
 
 
 def render_master_dag_source(*, dag_id: str) -> str:
-    """The master DAG's Python source (Figure 4's top graph).
+    """The master DAG's Python source (the stage graph's master half).
 
     Needs no data root or venv: it runs entirely in Airflow's environment and
     only resolves the profile and triggers sub-DAGs.
@@ -668,7 +671,8 @@ def render_dag_sources(
     venv_python: str,
     task_queue: str | None = None,
 ) -> dict[str, str]:
-    """dag_id -> source for all five DAGs (master first, then Figure 4 order)."""
+    """dag_id -> source for all five DAGs: master first, then stage-graph
+    order (declaration order)."""
     sources = {master_dag_id: render_master_dag_source(dag_id=master_dag_id)}
     for stage in Stage:
         sources[sub_dag_id_for_stage(master_dag_id, stage)] = render_sub_dag_source(
@@ -872,7 +876,7 @@ def render_bundle(config: RuntimeConfig, bundle_dir: Path | str) -> BundlePaths:
         )
     )
 
-    # Five DAG files (Figure 4): the master keeps the historical ingest.py
+    # Five DAG files (the stage graph): the master keeps the historical ingest.py
     # filename (load_bundle reads the dag id back from it); each sub-DAG gets
     # its stage-suffixed sibling.
     master_dag_id = config.resolved_dag_id()

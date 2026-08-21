@@ -78,7 +78,7 @@ def describe_activity(episode: hflow.Episode) -> hflow.CheckResult:
 
 @app.check(uses=OPENAI_ENDPOINT_ALIAS, version="hand-visibility-contact-sheet-v1")
 def hand_visibility(episode: hflow.Episode) -> hflow.CheckResult:
-    """Missing/occluded hand positions, one of Dyna's named quality issues.
+    """Missing/occluded hand positions, a quality issue named in Dyna's article.
 
     Hand visibility is a model judgment, not a signal statistic, so it lives
     on the VLM extension surface: sample frames, ask the model, record the

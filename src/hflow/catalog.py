@@ -1,6 +1,6 @@
 """The episode catalog: append-only Parquet tables under the data root.
 
-Dyna's warehouse, collapsed to its single-tenant equivalent
+The production warehouse pattern, collapsed to its single-tenant equivalent
 (docs/ARCHITECTURE.md, "Catalog and curation storage"): every ingest appends
 one row per episode plus long-format measurement/tag/interval rows, all as
 plain Parquet files DuckDB (or pandas, or anything) reads directly. No

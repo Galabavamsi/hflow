@@ -1,8 +1,8 @@
 """Benchmark (issue #26): per-frame JPEG storage vs canonical MCAP by GOP preset.
 
-Reproduces the first panel of the Dyna blog's Figure 3 at honest small scale:
-Dyna reports ~68% storage reduction moving from per-frame JPEG to in-band
-H.264 with tuned GOPs. The sum of the recording's JPEG payload bytes is the
+Measures the per-frame-JPEG vs canonical-MCAP storage effect at honest
+small scale, alongside the ~68% reduction Dyna's article reports (its
+Figure 3, first panel) for the same move to in-band H.264 with tuned GOPs. The sum of the recording's JPEG payload bytes is the
 per-frame-JPEG baseline (the storage floor of an H5-of-JPEGs layout),
 compared against the canonical MCAP file size under each GOP preset.
 
@@ -37,7 +37,7 @@ class StorageRow:
     file_bytes: int
     video_payload_bytes: int
     # Video PAYLOAD vs the JPEG payload baseline -- the codec effect, and the
-    # number comparable to Dyna's ~68% claim. File sizes are shown alongside
+    # number comparable to Dyna's ~68% measurement. File sizes are shown alongside
     # but are not the reduction metric: a real recording can carry hundreds of
     # MB of non-camera channels (lidar/radar/diagnostics) that pass through
     # into the canonical file and would swamp a file-level comparison.
@@ -157,7 +157,7 @@ def main() -> None:
     print(
         "\nreduction compares video PAYLOAD bytes (the codec effect); file sizes also"
         "\ncarry every non-camera channel passed through byte-for-byte."
-        "\nDyna's at-scale claim for comparison: ~68% reduction (real footage, tuned GOPs)."
+        "\nDyna's at-scale measurement for comparison: ~68% reduction (real footage, tuned GOPs)."
     )
 
 

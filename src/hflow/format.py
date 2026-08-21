@@ -12,8 +12,8 @@ container"):
   (protobuf-encoded): Annex B byte stream, SPS/PPS on every keyframe, no
   B-frames, one decodable access unit per message.
 - Topics are assigned to named chunk groups; topics in different groups never
-  share a chunk (Dyna's topic-group chunking). Default grouping: camera
-  schemas in ``cameras``, everything else in ``state``.
+  share a chunk (topic-group chunking, described in Dyna's article). Default
+  grouping: camera schemas in ``cameras``, everything else in ``state``.
 - Episode semantics and version stamps live in MCAP Metadata records named
   ``episode/v1`` and ``provenance/v1``; calibration/URDF files in Attachments.
 """
@@ -70,7 +70,7 @@ DEFAULT_STATE_GROUP = "state"
 
 # Target uncompressed chunk size per group, in bytes. Small enough that a
 # few-second time slice of a group is one or two fetches; measured defaults
-# are a benchmark-report deliverable (the blog does not disclose numbers).
+# are a benchmark-report deliverable (Dyna's article discloses no numbers).
 DEFAULT_CHUNK_SIZE_BYTES = 800_000
 
 # Schema names that identify a topic as a camera stream for default group
@@ -92,10 +92,10 @@ CANONICAL_VIDEO_SCHEMA_NAME = "foxglove.CompressedVideo"
 class GopPreset(StrEnum):
     """GOP-length preset keyed to how the data will be read.
 
-    Dyna treats GOP length as a training hyperparameter: VLA-style training
-    samples short sparse windows (pays a keyframe seek per sample, wants short
-    GOPs); world-model training reads long contiguous sequences (amortizes
-    keyframes, wants long GOPs).
+    GOP length is a training hyperparameter (Dyna's article treats it as
+    one): VLA-style training samples short sparse windows (pays a keyframe
+    seek per sample, wants short GOPs); world-model training reads long
+    contiguous sequences (amortizes keyframes, wants long GOPs).
     """
 
     VLA = "vla"

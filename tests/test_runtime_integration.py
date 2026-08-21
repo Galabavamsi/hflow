@@ -1,7 +1,8 @@
-"""End-to-end Compose runtime test: render the five Figure 4 DAGs, `docker
-compose up`, and drive the MASTER DAG through the REST API across all three
-lanes -- a full-profile batch run, a relabel-only run, and an online-mode
-single-episode run -- then read the catalog rows back on the host.
+"""End-to-end Compose runtime test: render the ingest stage graph's five
+DAGs, `docker compose up`, and drive the MASTER DAG through the REST API
+across all three lanes -- a full-profile batch run, a relabel-only run, and
+an online-mode single-episode run -- then read the catalog rows back on the
+host.
 
 Gated behind ``HFLOW_DOCKER_TESTS=1`` because it needs Docker, network (image
 pulls, pip installs, the pinned in-container ffmpeg download), and minutes of

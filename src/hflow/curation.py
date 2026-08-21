@@ -1,10 +1,11 @@
 """Curation: a SQL query over the catalog, out comes ``manifest.parquet``.
 
-Dyna's researcher interface ("a curation is now a SQL query") with zero
-services: DuckDB reads the catalog's Parquet directly. Nothing here is
-required -- the catalog is plain Parquet and users can point DuckDB, pandas,
-or anything else at it (the no-obfuscation tenet); this module just registers
-convenient views and applies the manifest-last idiom to the output.
+The researcher interface is a SQL query -- "a curation is now a SQL query",
+as Dyna's article puts it -- with zero services: DuckDB reads the catalog's
+Parquet directly. Nothing here is required -- the catalog is plain Parquet
+and users can point DuckDB, pandas, or anything else at it (the
+no-obfuscation tenet); this module just registers convenient views and
+applies the manifest-last idiom to the output.
 
 Views registered on the connection:
 

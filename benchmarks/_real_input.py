@@ -1,7 +1,7 @@
 """Shared real-footage input handling for the benchmark scripts.
 
-The synthetic fixtures answer "do the mechanisms behave as the blog
-describes"; a real recording answers "what do the numbers look like on real
+The synthetic fixtures answer "do the mechanisms behave as designed"; a
+real recording answers "what do the numbers look like on real
 content". Both benchmark scripts accept ``--input <mcap>`` and use the
 helpers here to discover the camera and state topics of an arbitrary
 recording instead of assuming the synthetic fixture's layout.
@@ -66,7 +66,7 @@ def plan_topic_groups(path: Path, camera_topics: list[str]) -> dict[str, str]:
     The canonical default (cameras vs everything-else) assumes a manipulation
     robot's layout: cameras plus small proprio channels. A sensor-heavy
     recording (lidar/radar point clouds, grids) breaks that assumption -- the
-    blog's instruction is to group topics that SHARE A READ PATTERN, so bulk
+    rule is to group topics that SHARE A READ PATTERN, so bulk
     modalities get their own group here, approximated by mean message size.
     One decode-free pass over the file.
     """

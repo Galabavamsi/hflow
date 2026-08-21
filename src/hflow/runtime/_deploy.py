@@ -9,8 +9,9 @@ Output directory contents:
 
 - ``dags/<dag_id>.py`` plus four ``dags/<sub_dag_id>.py`` -- the same five
   ingest DAGs the Compose runtime generates (ONE set of templates in
-  ``_templates``): the Figure 4 master and its sync/meta/labels/media
-  sub-DAGs, rendered against the deployment's data root and user-venv
+  ``_templates``): the ingest stage graph's master and its
+  sync/meta/labels/media sub-DAGs, rendered against the deployment's data
+  root and user-venv
   interpreter instead of the Compose container values -- plus a
   ``dags/.airflowignore`` so platforms that sync ``user/`` inside the dags
   folder never parse the pipeline file in Airflow's own environment.
@@ -127,7 +128,7 @@ class DeployPaths:
     """Where render_deploy_bundle put things.
 
     ``dag_file`` is the MASTER DAG (``dag_id`` is its id); ``sub_dag_files``
-    are the four stage sub-DAG files in Figure 4 order.
+    are the four stage sub-DAG files in stage-graph order (declaration order).
     """
 
     output_dir: Path
@@ -173,7 +174,7 @@ def render_deploy_bundle(config: DeployConfig, output_dir: Path | str) -> Deploy
     # syntaxes (regexp and glob), so ship the guard unconditionally.
     (dags_dir / ".airflowignore").write_text("user/\n")
 
-    # Five DAG files (Figure 4), each named after its dag id -- platforms
+    # Five DAG files (the stage graph), each named after its dag id -- platforms
     # sync whole dags/ folders, so generic filenames would collide across
     # pipelines.
     dag_id = config.resolved_dag_id()
@@ -249,7 +250,7 @@ API is called; you place these files with the tools you already use.
 
 ## What is in this bundle
 
-- `dags/{dag_filename}` -- the master ingest DAG (Dyna Figure 4): it resolves
+- `dags/{dag_filename}` -- the master ingest DAG: it resolves
   the run profile and triggers only the enabled stage sub-DAGs, chained
   sequentially. Trigger conf: `{{"uris": [...], "profile": {profile_names},
   "mode": "batch"|"online", "batch_count": optional int}}`; URIs resolve

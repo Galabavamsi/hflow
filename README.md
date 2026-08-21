@@ -31,16 +31,6 @@ as a graph, and records metadata and quality evidence in a queryable catalog.
 You can trace how outputs were produced, monitor every stage, and
 investigate a corpus without loading the underlying recordings.
 
-The design is an open source implementation of Dyna Robotics'
-["Training Dyna-2 at million-hour scale, repeatably"](https://www.dyna.co/research/dyna-2-infrastructure) article,
-published August 2026. Dyna-2 was trained on more than one million hours of
-egocentric video data, and the post describes the reusable infrastructure that
-made processing and experimenting with that data repeatable. You can think of
-HFlow as an independent, open-source implementation of those public ideas,
-adapted for people who need the same foundation without Dyna's million-hour
-production stack. It is not Dyna's private source code or an undisclosed
-wire-compatible production system.
-
 MCAP is HFlow's v1 input and output boundary because it efficiently stores
 and serves synchronized video, state, action, and other time-series streams.
 That format requirement does not define where the data comes from: human-worn
@@ -48,7 +38,7 @@ cameras, teleoperated robots, autonomous policies, and other collection systems
 can all feed the pipeline once their data is represented as a supported MCAP
 episode.
 
-> **Status: pre-v1, with the core lifecycle working end to end.** HFlow is ready to try locally. See [what is implemented](https://github.com/Hebbian-Robotics/hflow/blob/main/docs/ARCHITECTURE.md#what-is-different-from-dyna) and [open issues](https://github.com/Hebbian-Robotics/hflow/issues) for current details and remaining work.
+> **Status: pre-v1, with the core lifecycle working end to end.** HFlow is ready to try locally. See [what is implemented](https://github.com/Hebbian-Robotics/hflow/blob/main/docs/ARCHITECTURE.md#implementation-status) and [open issues](https://github.com/Hebbian-Robotics/hflow/issues) for current details and remaining work.
 
 **Help advance open robotics and Physical AI.** [Contributors are welcome](https://github.com/Hebbian-Robotics/hflow/blob/main/CONTRIBUTING.md), and no robot hardware is required.
 
@@ -62,7 +52,7 @@ episode.
 
 ## What you get
 
-Human and robot data move through the same four-stage lifecycle Dyna describes:
+Human and robot data move through a four-stage lifecycle:
 
 ```
 collection --> ingestion ---------------> curation ------> delivery
@@ -76,7 +66,7 @@ collection --> ingestion ---------------> curation ------> delivery
 </p>
 
 - **Your processing code stays yours.** Transformations, quality checks, labels, and enrichments are plain Python functions in your own environment. Existing code plugs in through small adapters instead of being rewritten for a proprietary framework.
-- **Episodes are MCAP**, the container that ROS 2 records natively and [Foxglove](https://foxglove.dev/)/[Rerun](https://rerun.io/) open directly, written with the two tuning ideas from Dyna's post: in-band H.264 with GOP length matched to how the data is read, and **topic-group chunking** (camera streams and state streams never share a chunk, so a training sample costs one read per group instead of one per topic).
+- **Episodes are MCAP**, the container that ROS 2 records natively and [Foxglove](https://foxglove.dev/)/[Rerun](https://rerun.io/) open directly, written with two tunings described in Dyna's article: in-band H.264 with GOP length matched to how the data is read, and **topic-group chunking** (camera streams and state streams never share a chunk, so a training sample costs one read per group instead of one per topic).
 - **Processed episodes carry their provenance.** The file itself records the schema, pipeline, and tool versions that produced it, plus its source URI when available. Catalog records connect measurements and outcomes to step versions, making it easier to trace a bad result back to its origin.
 - **The pipeline is visible as a graph.** HFlow renders Airflow DAGs so you can see how stages connect and monitor task status, logs, retries, and reruns.
 - **Quality checks produce reusable evidence.** Accessors extract the inputs existing processing code expects (numpy arrays, MP4 paths, JPEG frames), and results land as queryable measurements rather than hardcoded verdicts. Different datasets can apply different thresholds without processing the media again.
@@ -198,7 +188,6 @@ WHERE task = 'fold_napkin'
 2. **Evidence, not verdicts.** Checks record measurements with coverage; pass/fail policy belongs to the consumer, at curation time. Quality tags route episodes; they never delete data.
 3. **Standard formats at every boundary.** MCAP episodes, Parquet catalogs, Airflow DAGs. Our code exists only where the format forces bridging or a pitfall is genuinely non-obvious.
 4. **Your code stays your code.** Existing transforms, checks, and enrichments plug in through small adapters instead of being rewritten.
-5. **Transparent provenance.** The docs mark every design element as *Dyna says* (from the blog) or *HFlow chooses* (our engineering judgment, with the evidence behind it).
 
 ## Non-goals
 
@@ -221,27 +210,22 @@ WHERE task = 'fold_napkin'
 - [Frequently asked questions](https://github.com/Hebbian-Robotics/hflow/blob/main/docs/FAQ.md): formats, infrastructure, scale, project scope, and current release status
 - [How HFlow fits the robotics data stack](https://github.com/Hebbian-Robotics/hflow/blob/main/docs/INTEGRATIONS.md): MCAP, Airflow, Foxglove, Rerun, DuckDB, object storage, and training formats
 - [Runnable examples](https://github.com/Hebbian-Robotics/hflow/blob/main/examples/README.md): exact commands, prerequisites, expected output, and links to the relevant guides
-- [Architecture and differences from Dyna](https://github.com/Hebbian-Robotics/hflow/blob/main/docs/ARCHITECTURE.md): the implemented, simplified, deferred, and out-of-scope matrix
+- [Architecture and implementation status](https://github.com/Hebbian-Robotics/hflow/blob/main/docs/ARCHITECTURE.md): the implemented, simplified, deferred, and out-of-scope matrix
 - [Call OpenAI vision from a step](https://github.com/Hebbian-Robotics/hflow/blob/main/docs/how-to/call-openai-vision.md): a focused guide linked to a complete executable pipeline
 - [Contributing](https://github.com/Hebbian-Robotics/hflow/blob/main/CONTRIBUTING.md): development setup, validation commands, test gates, and pull-request expectations
 - [Security policy](https://github.com/Hebbian-Robotics/hflow/blob/main/SECURITY.md): supported versions and private vulnerability reporting
 
 ## References
 
-Primary source:
 
-- Dyna Robotics, [Training Dyna-2 at million-hour scale, repeatably](https://www.dyna.co/research/dyna-2-infrastructure) (Aug 2026)
-
-Formats and tooling this project builds on:
-
+- Dyna Robotics, [Training Dyna-2 at million-hour scale, repeatably](https://www.dyna.co/research/dyna-2-infrastructure)
 - [MCAP specification](https://mcap.dev/spec) and [Python libraries](https://mcap.dev/docs/python/) (Foxglove)
 - [foxglove.CompressedVideo schema](https://docs.foxglove.dev/docs/sdk/schemas/compressed-video): in-band H.264/H.265/VP9/AV1 video in MCAP
-- [Apache Airflow 3](https://airflow.apache.org/): ingestion DAG orchestration
-- [DuckDB](https://duckdb.org/): curation queries over the Parquet catalog
-- [Foxglove](https://foxglove.dev/) and [Rerun](https://rerun.io/): episode inspection
-- [FFmpeg](https://ffmpeg.org/): video processing and the deterministic frame instrument
-
-Parts of the durability and measurement design draw on production experience from [Pareto](https://github.com/Hebbian-Robotics/pareto), Hebbian Robotics' robotics data curation platform.
+- [Apache Airflow](https://airflow.apache.org/)
+- [DuckDB](https://duckdb.org/)
+- [Foxglove](https://foxglove.dev/) and [Rerun](https://rerun.io/)
+- [FFmpeg](https://ffmpeg.org/)
+- [Pareto](https://github.com/Hebbian-Robotics/pareto), Hebbian Robotics' robotics data curation platform.
 
 ## License
 

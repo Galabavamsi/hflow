@@ -1,12 +1,12 @@
 """Canonical MCAP writer: topic-group chunking.
 
-No open-source MCAP writer implements Dyna's topic-group chunking; this one
-does. Each channel is assigned to a named group at registration; each group
-maintains its own chunk buffer and flushes its own chunks, so topics in
-different groups NEVER share a chunk and each group's chunk stream is
-time-major. Chunking changes write order, not the format: output must be
-spec-conforming MCAP readable by the stock ``mcap`` package, Foxglove, and
-Rerun.
+No open-source MCAP writer implements topic-group chunking (the chunk
+layout described in Dyna's article); this one does. Each channel is
+assigned to a named group at registration; each group maintains its own
+chunk buffer and flushes its own chunks, so topics in different groups
+NEVER share a chunk and each group's chunk stream is time-major. Chunking
+changes write order, not the format: output must be spec-conforming MCAP
+readable by the stock ``mcap`` package, Foxglove, and Rerun.
 
 Implementation notes (mirrors ``mcap.writer.Writer``, which hardcodes a
 single chunk builder):

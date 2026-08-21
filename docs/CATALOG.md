@@ -1,11 +1,11 @@
 # Query and curate Physical AI datasets
 
-Dyna's answer to "which episodes go in the dataset?" is a warehouse and a SQL
-query. HFlow ships the single-tenant collapse of the same interface: every
-processed episode appends rows to **plain Parquet files under your data
-root**, and [DuckDB](https://duckdb.org/) queries them directly: same
-researcher-facing SQL, zero services. A curation is a query; its output is
-`manifest.parquet`.
+HFlow's answer to "which episodes go in the dataset?" is a SQL query over
+plain files: every processed episode appends rows to **plain Parquet files
+under your data root**, and [DuckDB](https://duckdb.org/) queries them
+directly. Researcher-facing SQL, zero services (Dyna's article describes the
+same query interface backed by a warehouse at their scale). A curation is a
+query; its output is `manifest.parquet`.
 
 Nothing on this page is a gate. The catalog is ordinary Parquet: point
 DuckDB, pandas, or polars at the files and ignore our helpers entirely.
@@ -294,7 +294,7 @@ refuse loudly on mismatch.
 ## See also
 
 - [Architecture](./ARCHITECTURE.md): "Catalog and curation storage" for the
-  provenance of this design (what Dyna says vs. what we chose)
+  rationale behind this design
 - [Porting guide](./PORTING.md): how measurements get produced in the first
   place
 - [How HFlow fits the robotics data stack](./INTEGRATIONS.md): the boundary
