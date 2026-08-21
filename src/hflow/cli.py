@@ -32,6 +32,9 @@ if TYPE_CHECKING:
     from hflow.runtime import RemoteRuntimeEndpoint
 
 DEFAULT_DEPLOY_OUTPUT_DIR = Path("./deploy")
+# Mirrors RuntimeConfig.api_port; kept here so the parser can state it without
+# importing the runtime package, which `up` defers until it actually runs.
+DEFAULT_API_PORT = 8080
 
 
 def _environment_data_root() -> str:
@@ -203,6 +206,17 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="where to render the bundle (default: <data-root>/runtime; ./runtime for bucket URLs)",
+    )
+    up_parser.add_argument(
+        "--api-port",
+        type=int,
+        default=DEFAULT_API_PORT,
+        help=(
+            "host port for the Airflow API, written into a new bundle's .env as "
+            f"API_PORT (default: {DEFAULT_API_PORT}). An existing .env is never "
+            "rewritten, so this only takes effect on a bundle that does not have "
+            "one yet"
+        ),
     )
     up_parser.add_argument(
         "--hflow-source",
@@ -483,6 +497,7 @@ def _command_up(arguments: argparse.Namespace) -> int:
         app_variable=app_variable,
         requirements_file=arguments.requirements,
         hflow_source=hflow_source,
+        api_port=arguments.api_port,
     )
     # A bucket data root has no local directory to host the bundle: ./runtime.
     default_bundle_dir = (
