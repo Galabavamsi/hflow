@@ -219,6 +219,63 @@ def test_check_with_optional_extra_parameter_registers() -> None:
     assert {check.name for check in app.checks} == {"optional_topic"}
 
 
+def test_check_without_episode_parameter_fails_at_registration() -> None:
+    app = hflow.App("signature-zeroarg", data_root=Path("/tmp"))
+
+    def no_episode() -> hflow.CheckResult:
+        return hflow.CheckResult(measurements={"n": 1})
+
+    with pytest.raises(ValueError, match="cannot accept the episode"):
+        app.check()(cast(hflow.steps.CheckFunction, no_episode))
+
+    assert app.checks == []
+
+
+def test_check_with_only_kwargs_fails_at_registration() -> None:
+    app = hflow.App("signature-kwargs-only", data_root=Path("/tmp"))
+
+    def kwargs_only(**kwargs: object) -> hflow.CheckResult:
+        return hflow.CheckResult(measurements={"n": len(kwargs)})
+
+    with pytest.raises(ValueError, match="cannot accept the episode"):
+        app.check()(cast(hflow.steps.CheckFunction, kwargs_only))
+
+    assert app.checks == []
+
+
+def test_check_with_varargs_registers() -> None:
+    app = hflow.App("signature-varargs", data_root=Path("/tmp"))
+
+    @app.check()
+    def varargs_check(*args: object) -> hflow.CheckResult:
+        return hflow.CheckResult(measurements={"n": len(args)})
+
+    assert {check.name for check in app.checks} == {"varargs_check"}
+
+
+def test_check_whose_episode_parameter_has_a_default_registers_and_runs() -> None:
+    """A default on the episode parameter does not stop it receiving the episode.
+
+    The check is called as ``function(canonical_episode)``, so the default is
+    never used and the signature is satisfiable. An earlier form of the
+    accepts-the-episode test skipped every defaulted positional parameter
+    before claiming the episode's slot, which rejected this at registration
+    even though it had always worked.
+    """
+    app = hflow.App("signature-defaulted-episode", data_root=Path("/tmp"))
+
+    @app.check()
+    def defaulted_episode(episode: hflow.Episode | None = None) -> hflow.CheckResult:
+        return hflow.CheckResult(measurements={"episode_arrived": episode is not None})
+
+    assert {check.name for check in app.checks} == {"defaulted_episode"}
+    # Registration is the regression, but assert it is callable the way the
+    # runtime calls it, so the test fails if the call convention ever changes.
+    assert app.checks[0].function(cast(hflow.Episode, object())).measurements == {
+        "episode_arrived": True
+    }
+
+
 _STEP_VERSION_GLOBAL_THRESHOLD = 0.1
 
 
