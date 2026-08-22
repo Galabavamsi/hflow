@@ -354,6 +354,61 @@ def _unsatisfiable_check_parameters(
     return unsatisfiable, seen_episode or sees_varargs
 
 
+# Every step below is invoked with exactly one positional argument, an Episode:
+# checks and enrichments with the canonical episode, derived-signal functions
+# with the source episode. So all three share one satisfiability rule, and the
+# only thing that differs is what the example in the message should say.
+_STEP_EXAMPLE_BY_KIND = {
+    # step kind -> (return annotation, wrapper-name suffix)
+    "check": ("hflow.CheckResult", "check"),
+    "enrichment": ("hflow.EnrichmentResult", "enrichment"),
+    "derived channel": ("hflow.DerivedSeries", "series"),
+}
+
+
+def _raise_if_step_cannot_take_only_an_episode(
+    function: Callable[..., object],
+    *,
+    step_kind: str,
+    step_name: str,
+    decorator: str,
+) -> None:
+    """Refuse at registration a step the runtime could never call.
+
+    Registration is the only place this is knowable and the only place it is
+    cheap: left alone, an unsatisfiable signature raises ``TypeError`` once
+    per episode, which the App records as an infrastructure error while the
+    measurement column goes quietly missing.
+    """
+    unsatisfiable, accepts_episode = _unsatisfiable_check_parameters(function)
+    return_type, wrapper_suffix = _STEP_EXAMPLE_BY_KIND[step_kind]
+    # A derived channel is named by its topic ("/joint_states"), which is not a
+    # valid identifier, so the pasteable example needs a sanitized wrapper name.
+    identifier_stem = re.sub(r"\W+", "_", step_name).strip("_")
+    wrapper_name = f"{identifier_stem}_{wrapper_suffix}"
+    if unsatisfiable:
+        # Bind every unsatisfiable parameter, not just the first: the example is
+        # meant to be pasted, and a snippet binding one of two still fails.
+        sorted_names = sorted(unsatisfiable)
+        bindings = ", ".join(f"{parameter_name}=..." for parameter_name in sorted_names)
+        raise ValueError(
+            f"{step_kind} {step_name!r} cannot be called with only an episode: "
+            f"required parameter(s) without defaults: {', '.join(sorted_names)}. "
+            "Wrap it in a function that binds them, e.g.\n\n"
+            f"    {decorator}\n"
+            f"    def {wrapper_name}(ep: hflow.Episode) -> {return_type}:\n"
+            f"        return {getattr(function, '__name__', step_name)}(ep, {bindings})\n"
+        )
+    if not accepts_episode:
+        raise ValueError(
+            f"{step_kind} {step_name!r} cannot accept the episode: it must take "
+            "the episode as its first positional parameter, e.g.\n\n"
+            f"    {decorator}\n"
+            f"    def {wrapper_name}(ep: hflow.Episode) -> {return_type}:\n"
+            "        ...\n"
+        )
+
+
 def _execute_enrichment(
     registered_enrichment: RegisteredEnrichment,
     canonical_episode: Episode,
@@ -636,26 +691,9 @@ class App:
                 raise ValueError("pass name=... when registering a callable without __name__")
             if check_name in self._registered_step_names():
                 raise ValueError(f"a step named {check_name!r} is already registered")
-            unsatisfiable, accepts_episode = _unsatisfiable_check_parameters(function)
-            if unsatisfiable:
-                unsatisfiable_list = ", ".join(sorted(unsatisfiable))
-                raise ValueError(
-                    f"check {check_name!r} cannot be called with only an episode: "
-                    f"required parameter(s) without defaults: {unsatisfiable_list}. "
-                    "Wrap it in a function that binds them, e.g.\n\n"
-                    f"    @app.check()\n"
-                    f"    def {check_name}_check(ep: hflow.Episode) -> hflow.CheckResult:\n"
-                    f"        return {getattr(function, '__name__', check_name)}(ep, {unsatisfiable_list.split(', ')[0]}=...)\n"
-                )
-            if not accepts_episode:
-                raise ValueError(
-                    f"check {check_name!r} cannot accept the episode: it must take "
-                    "the canonical episode as its first positional parameter, e.g.\n\n"
-                    f"    @app.check()\n"
-                    f"    def {check_name}_check(ep: hflow.Episode) -> hflow.CheckResult:\n"
-                    "        ...\n"
-                )
-
+            _raise_if_step_cannot_take_only_an_episode(
+                function, step_kind="check", step_name=check_name, decorator="@app.check()"
+            )
             requires_set = frozenset(requires) if requires is not None else frozenset()
             self.checks.append(
                 RegisteredCheck(
@@ -698,6 +736,12 @@ class App:
                 raise ValueError("pass name=... when registering a callable without __name__")
             if enrichment_name in self._registered_step_names():
                 raise ValueError(f"a step named {enrichment_name!r} is already registered")
+            _raise_if_step_cannot_take_only_an_episode(
+                function,
+                step_kind="enrichment",
+                step_name=enrichment_name,
+                decorator="@app.enrich()",
+            )
             requires_set = frozenset(requires) if requires is not None else frozenset()
             self.enrichments.append(
                 RegisteredEnrichment(
@@ -736,6 +780,12 @@ class App:
         def register(function: DerivedFunction) -> DerivedFunction:
             if any(registered.topic == topic for registered in self.derived):
                 raise ValueError(f"a derived channel for topic {topic!r} is already registered")
+            _raise_if_step_cannot_take_only_an_episode(
+                function,
+                step_kind="derived channel",
+                step_name=topic,
+                decorator=f'@app.derive("{topic}")',
+            )
             self.derived.append(
                 DerivedChannel(
                     topic=topic,

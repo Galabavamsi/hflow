@@ -276,6 +276,56 @@ def test_check_whose_episode_parameter_has_a_default_registers_and_runs() -> Non
     }
 
 
+@pytest.mark.parametrize("step_kind", ["enrichment", "derived channel"])
+def test_enrichments_and_derives_reject_unsatisfiable_signatures(step_kind: str) -> None:
+    """The same guard as checks: all three are called with one Episode.
+
+    #86 and #93 fixed this for ``app.check()`` only, leaving the two
+    structurally identical registration paths accepting a signature the
+    runtime could never call.
+    """
+    app = hflow.App(f"guard-{step_kind.split()[0]}", data_root=Path("/tmp"))
+
+    def needs_topics(episode: hflow.Episode, *, topics: list[str]) -> object:
+        return None
+
+    def takes_nothing() -> object:
+        return None
+
+    def register(function: object) -> None:
+        if step_kind == "enrichment":
+            app.enrich(name="guarded")(cast(hflow.steps.EnrichmentFunction, function))
+        else:
+            app.derive("/derived")(cast(hflow.steps.DerivedFunction, function))
+
+    with pytest.raises(ValueError, match="topics"):
+        register(needs_topics)
+    with pytest.raises(ValueError, match="cannot accept the episode"):
+        register(takes_nothing)
+    assert app.enrichments == []
+    assert app.derived == []
+
+
+def test_wrapper_example_binds_every_missing_parameter() -> None:
+    """The example is meant to be pasted, so it must bind all of them.
+
+    Binding only the first left a snippet that still raised TypeError on the
+    second parameter.
+    """
+    app = hflow.App("wrapper-example", data_root=Path("/tmp"))
+
+    def two_missing(
+        episode: hflow.Episode, *, topics: list[str], threshold: float
+    ) -> hflow.CheckResult:
+        return hflow.CheckResult(measurements={"n": len(topics) + threshold})
+
+    with pytest.raises(ValueError) as raised:
+        app.check()(cast(hflow.steps.CheckFunction, two_missing))
+    message = str(raised.value)
+    assert "threshold=..." in message
+    assert "topics=..." in message
+
+
 _STEP_VERSION_GLOBAL_THRESHOLD = 0.1
 
 

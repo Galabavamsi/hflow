@@ -28,6 +28,8 @@ def my_check(ep: hflow.Episode) -> hflow.CheckResult:
 
 `@app.check()` takes `name=` (defaults to the function name), `critical=`, `requires={...}` (capability set, e.g. `{"gpu"}`), `uses="alias"` (a named endpoint; see the VLM section), and optional `version=`. Step identity automatically includes source, defaults, and captured stable configuration such as numeric thresholds. Pass an explicit `version=` for opaque client objects or external model configuration the SDK cannot inspect deterministically. Checks that declare no resources run before checks that do, so cheap integrity checks gate expensive model calls. Today `requires`/`uses` record intent, order steps, and let preflight verify named endpoints are configured; they do **not** route the step to a particular worker or GPU pool (per-step compute routing is [deferred](./ARCHITECTURE.md#implementation-status)) -- a bring-your-own Airflow deployment arranges those resources itself.
 
+Every step is called with exactly one argument, an `Episode`, so `@app.check()`, `@app.enrich()`, and `@app.derive()` refuse a function the runtime could never call: one with a required parameter beyond the episode, or with no positional slot to receive it. That refusal happens at registration, not once per episode, and the error shows the wrapper form to use instead. To pass configuration, bind it in a wrapper (`return action_rate(ep, topics=[...])`) rather than adding a parameter.
+
 ## Dialect 1: numpy arrays
 
 Your years-old script takes an `(N, joints)` array:
