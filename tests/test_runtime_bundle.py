@@ -838,3 +838,74 @@ def test_api_port_inside_the_tcp_range_is_accepted(config: RuntimeConfig, good_p
     from dataclasses import replace
 
     assert replace(config, api_port=good_port).api_port == good_port
+
+
+def test_api_port_true_is_rejected_even_though_it_passes_the_range(
+    config: RuntimeConfig,
+) -> None:
+    """bool is the case the range check cannot catch.
+
+    True == 1, so the range test passes it, and the value is only ever str()-ed
+    after that. Without this it reaches the rendered .env as API_PORT=True.
+    False is covered alongside the other wrong types below, where it is the
+    weaker case: it is 0, so the range check would reject it anyway, just with
+    the wrong reason.
+    """
+    from dataclasses import replace
+
+    with pytest.raises(ValueError, match="api_port must be an int, not bool: True"):
+        replace(config, api_port=True)
+
+
+def test_api_port_accepts_an_int_enum_member(config: RuntimeConfig) -> None:
+    """An IntEnum member is an int, and CONTRIBUTING asks for typed variants.
+
+    This is why the test is `isinstance` and not `type(...) is int`. The member
+    renders as bare digits on 3.11+, so the .env it produces is identical to the
+    one a plain int produces.
+    """
+    from dataclasses import replace
+    from enum import IntEnum
+
+    class Port(IntEnum):
+        API = 9090
+
+    assert replace(config, api_port=Port.API).api_port == 9090
+
+
+def test_api_port_rejects_a_numpy_integer(config: RuntimeConfig) -> None:
+    """A numpy integer is not an int, and a config field is not user data.
+
+    catalog.py accommodates numpy scalars in measurements because those are user
+    data mid-append and a crash would cost the whole episode. api_port is set
+    once by the caller, rendered into a .env that is never rewritten, and
+    interpolated into api_base_url, so refusing it costs one line at the call
+    site and nothing downstream.
+    """
+    from dataclasses import replace
+
+    import numpy as np
+
+    with pytest.raises(ValueError, match="api_port must be an int, not int64"):
+        replace(config, api_port=np.int64(9090))
+
+
+@pytest.mark.parametrize(
+    ("bad_port", "type_name"),
+    [("8080", "str"), (8080.0, "float"), (None, "NoneType"), (True, "bool"), (False, "bool")],
+)
+def test_api_port_of_the_wrong_type_is_rejected_at_construction(
+    config: RuntimeConfig, bad_port: object, type_name: str
+) -> None:
+    """The field is annotated int, so anything else is refused where it is set.
+
+    Two different prior behaviors end up here. A float passed the range check
+    and rendered API_PORT=8080.0, which Compose will not take. A str or None
+    failed the range check instead, but as a TypeError from the comparison,
+    which nothing catches: `_command_up` handles ValueError only, so it left
+    a traceback. Reporting the type first turns both into one ValueError.
+    """
+    from dataclasses import replace
+
+    with pytest.raises(ValueError, match=f"api_port must be an int, not {type_name}"):
+        replace(config, api_port=bad_port)
