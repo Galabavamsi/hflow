@@ -54,6 +54,14 @@ runtime. `hflow up` packages the same pipeline as Airflow 3 DAGs, and
 `hflow ingest` triggers runs against that deployment. See the
 [runtime guide](./RUNTIME.md).
 
+## Can I test one check on one episode?
+
+Yes. Call the check function directly with an `hflow.Episode` for the tightest
+function-level loop. This skips runner behavior such as registered gates,
+quarantine, and catalog recording. The [quality-check porting
+guide](./PORTING.md#test-one-check-directly) shows the pattern and when to
+follow it with `app.test(...)`.
+
 ## Do I have to rewrite my existing processing code?
 
 Usually not. Your existing function can keep accepting the numpy array, MP4

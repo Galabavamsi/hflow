@@ -227,6 +227,35 @@ report = app.test("episode_0001.mcap")
 
 `app.test()` runs the whole registered pipeline on one episode **in-process**, with no Docker and no scheduler. It transforms the input into a canonical episode under `<data_root>/test-runs/`, runs every check with the ordering and gate semantics described above, prints a summary, and returns the full `TestReport` (per-check status, measurements, durations, quarantine tags). Iterate on a check in seconds; the canonical file it writes opens directly in Foxglove or Rerun for eyeballing.
 
+### Test one check directly
+
+For the tightest loop on one check, open an existing canonical episode and call
+the registered function directly:
+
+```python
+import hflow
+
+from my_pipeline import camera_blackout
+
+with hflow.Episode("episode_0001.canonical.mcap") as episode:
+    result = camera_blackout(episode)
+
+print(result.measurements)
+print(result.intervals)
+print(result.tags)
+print(result.verdict)
+```
+
+The decorator returns the original function, so a check defined with
+`@app.check()` remains directly callable. Use a canonical episode when you want
+the same input shape the pipeline supplies at run time.
+
+This tests the check function only. It does not apply its registered gate,
+produce run status or timing, enforce quarantine and ordering, resolve endpoint
+overrides, or write catalog rows. Follow it with `app.test(...)` when you need to
+verify those pipeline behaviors; there is currently no check-name selector for
+`app.test()`.
+
 When the in-process loop is stable, `app.run()` or `hflow up` executes the
 same pipeline as an Airflow DAG in the local Docker Compose runtime. For an
 existing Airflow 3 deployment, `hflow deploy` emits the DAG and user-venv
