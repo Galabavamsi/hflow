@@ -11,6 +11,9 @@ on:
 
 permissions:
   pull-requests: write
+  # Reading the author's repository permission below needs more than the
+  # implicit metadata scope that `pull-requests` alone leaves us with.
+  contents: read
 
 jobs:
   enforce_open_pr_cap:
@@ -25,6 +28,32 @@ jobs:
 
             const openedPullRequest = context.payload.pull_request
             const author = openedPullRequest.user.login
+
+            // Ask what access the author actually has, rather than trusting the
+            // event payload's author_association. That field reports only
+            // PUBLIC org membership, so a maintainer whose Hebbian-Robotics
+            // membership is private arrives as CONTRIBUTOR and this job closes
+            // their own pull request -- which is exactly what happened to #109.
+            // The permission endpoint does not depend on membership visibility.
+            let accessLevel = null
+            try {
+              const { data: access } = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                username: author,
+              })
+              accessLevel = access.permission
+            } catch (error) {
+              // Never let an unreadable permission decide the outcome on its
+              // own: fall through to author_association, which is what this
+              // job used before and is still right for outside contributors.
+              core.info(`could not read @${author}'s access (${error.status}); using author_association`)
+            }
+            if (['admin', 'maintain', 'write'].includes(accessLevel)) {
+              core.info(`@${author} has ${accessLevel} access; cap does not apply.`)
+              return
+            }
+
             const trustedAssociations = ['OWNER', 'MEMBER', 'COLLABORATOR']
             if (trustedAssociations.includes(openedPullRequest.author_association)) {
               core.info(`@${author} is ${openedPullRequest.author_association}; cap does not apply.`)
