@@ -10,6 +10,13 @@ from pathlib import Path
 
 import hflow
 
+# Imported as functions, not reached as ``hflow.checks.x`` attributes: a step's
+# version content-hashes the functions it NAMES (and, transitively, the hflow
+# code they call), while a module contributes only its name. Aliased because
+# the wrapper below takes the built-in's name.
+from hflow.checks import timestamp_regularity as measure_timestamp_regularity
+from hflow.ffmpeg import frame_stats
+
 # Inside the runtime's containers the data root is always mounted at
 # /opt/airflow/data; on the host the corpus lives where prepare.py wrote it.
 # Both vantage points name the same directory, so local runs and Airflow runs
@@ -22,12 +29,12 @@ app = hflow.App("egocentric", data_root=DATA_ROOT)
 
 @app.check()
 def timestamp_regularity(episode: hflow.Episode) -> hflow.CheckResult:
-    return hflow.checks.timestamp_regularity(episode, expected_hz={episode.cameras[0]: 10.0})
+    return measure_timestamp_regularity(episode, expected_hz={episode.cameras[0]: 10.0})
 
 
 @app.check(critical=True)
 def camera_health(episode: hflow.Episode) -> hflow.CheckResult:
-    stats = hflow.ffmpeg.frame_stats(episode.video())
+    stats = frame_stats(episode.video())
     camera_start_ns = int(episode.channel(episode.cameras[0]).timestamps[0])
     freeze_intervals = [
         hflow.Interval(

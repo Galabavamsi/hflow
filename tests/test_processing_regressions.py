@@ -2,9 +2,12 @@
 
 import functools
 import json
+import logging
+import re
 import textwrap
 from collections.abc import Callable
 from pathlib import Path
+from types import ModuleType
 from typing import cast
 
 import pytest
@@ -18,7 +21,11 @@ import hflow
 from hflow.doctor import diagnose
 from hflow.format import METADATA_RECORD_EPISODE
 from hflow.mcap_writer import CanonicalMcapWriter
-from hflow.steps import compute_check_version
+from hflow.steps import (
+    UNDESCRIBED_CONFIGURATION_KEY,
+    compute_check_version,
+    step_identity_payload,
+)
 from hflow.testing import SyntheticEpisodeSpec, synthesize_episode
 from hflow.transform import write_canonical_episode
 from hflow.video import estimate_fps_from_log_times
@@ -581,6 +588,245 @@ def test_step_version_includes_referenced_global_configuration(
     )
 
     assert low_threshold_version != high_threshold_version
+
+
+# Composition in HFlow runs through shared library code, not through edges
+# between checks: two built-ins share one ffmpeg pass by both calling
+# ``frame_stats``, and the motion checks share ``hflow.motion``. That only
+# keeps its integrity if a step version follows the code the step calls, all
+# the way down -- otherwise editing a parser or a constant one level below the
+# step changes what it measures while its version stands still, and the new
+# rows append under the old version.
+#
+# These helpers are module level on purpose: a step hash follows GLOBAL names,
+# so a helper defined inside a test body would be invisible to the walk under
+# test and every assertion below would pass vacuously.
+
+_TRANSITIVE_TOLERANCE = 0.25
+_MEMOISED_TOLERANCE = 0.5
+
+
+def _two_levels_below_the_step(value: float) -> bool:
+    return value > _TRANSITIVE_TOLERANCE
+
+
+def _named_directly_by_the_step(value: float) -> bool:
+    return _two_levels_below_the_step(value)
+
+
+def _check_over_a_helper_chain(_episode: hflow.Episode) -> hflow.CheckResult:
+    return hflow.CheckResult(verdict=_named_directly_by_the_step(1.0))
+
+
+@functools.lru_cache(maxsize=1)
+def _memoised_helper() -> bool:
+    return _MEMOISED_TOLERANCE > 0.1
+
+
+def _check_over_a_memoised_helper(_episode: hflow.Episode) -> hflow.CheckResult:
+    return hflow.CheckResult(verdict=_memoised_helper())
+
+
+class _OpaqueHelperState:
+    """Something the identity machinery cannot describe, held by a helper."""
+
+
+_OPAQUE_HELPER_STATE = _OpaqueHelperState()
+
+
+def _helper_holding_opaque_state() -> bool:
+    return _OPAQUE_HELPER_STATE is not None
+
+
+def _check_over_an_opaque_helper(_episode: hflow.Episode) -> hflow.CheckResult:
+    return hflow.CheckResult(verdict=_helper_holding_opaque_state())
+
+
+def _mutually_recursive_even(remaining: int) -> bool:
+    return True if remaining == 0 else _mutually_recursive_odd(remaining - 1)
+
+
+def _mutually_recursive_odd(remaining: int) -> bool:
+    return False if remaining == 0 else _mutually_recursive_even(remaining - 1)
+
+
+def _check_over_mutual_recursion(_episode: hflow.Episode) -> hflow.CheckResult:
+    return hflow.CheckResult(verdict=_mutually_recursive_even(2))
+
+
+def _version_of(function: Callable[..., object], name: str = "probe") -> str:
+    return compute_check_version(name, function, False, frozenset(), None)
+
+
+def test_step_version_follows_a_helper_the_step_does_not_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The step names one helper; the behavior lives in the one below it."""
+    before = _version_of(_check_over_a_helper_chain)
+    monkeypatch.setattr(
+        f"{__name__}._two_levels_below_the_step",
+        lambda value: value > 99.0,
+    )
+
+    assert _version_of(_check_over_a_helper_chain) != before
+
+
+def test_step_version_follows_a_constant_read_below_the_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tuned constant is a behavior change wherever it is defined.
+
+    Distinct from the helper test above: swapping a function changes a source
+    the walk already read, while a constant is only reachable by descending
+    into that helper's own captured globals.
+    """
+    before = _version_of(_check_over_a_helper_chain)
+    monkeypatch.setattr(f"{__name__}._TRANSITIVE_TOLERANCE", 0.75)
+
+    assert _version_of(_check_over_a_helper_chain) != before
+
+
+def test_step_version_reads_through_a_memoised_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cache is not behavior, so the walk unwraps it and keeps going.
+
+    Registration used to refuse a step that reached a memoised helper at all
+    (``hflow.ffmpeg._binary`` memoises the probes the instrument calls), which
+    made "cannot version this" indistinguishable from "nothing to version".
+    """
+    before = _version_of(_check_over_a_memoised_helper)
+    monkeypatch.setattr(f"{__name__}._MEMOISED_TOLERANCE", 0.9)
+
+    assert _version_of(_check_over_a_memoised_helper) != before
+
+
+def test_step_version_terminates_on_mutually_recursive_helpers() -> None:
+    """Cycles are cut by the visited set, not by a depth limit.
+
+    Completing at all is most of the assertion; the repeat pins that the cut
+    is taken at the same place every time, since a cycle broken by traversal
+    order rather than by identity would hash differently per call.
+    """
+    assert _version_of(_check_over_mutual_recursion) == _version_of(_check_over_mutual_recursion)
+
+
+def test_step_version_follows_a_parsing_pattern_below_the_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A compiled regex is behavior when it is how output is read.
+
+    ``_METADATA_LINE_PATTERN`` is how the ffmpeg instrument turns a pass over
+    the pixels into the measurements every camera check reports, two calls
+    below the check. Recompiling it differently changes those numbers, so it
+    has to change their versions.
+    """
+    before = _version_of(hflow.checks.camera_signal_quality)
+    monkeypatch.setattr(
+        "hflow.ffmpeg._instrument._METADATA_LINE_PATTERN",
+        re.compile(r"^(?P<key>never_matches)=(?P<value>.*)$"),
+    )
+
+    assert _version_of(hflow.checks.camera_signal_quality) != before
+
+
+def test_step_version_ignores_a_logger_a_helper_happens_to_hold() -> None:
+    """Runtime logging configuration is not part of what a step computes.
+
+    A logger is reachable from real built-ins (``hflow.ffmpeg._binary`` warns
+    about an unpinned binary), so it must be describable or the walk stops
+    there -- but describing its handlers or level would hash the same code
+    differently under different logging setups.
+    """
+    logger = logging.getLogger("hflow.test.identity")
+
+    def check_holding_a_logger(_episode: hflow.Episode) -> hflow.CheckResult:
+        logger.debug("measuring")
+        return hflow.CheckResult(measurements={"ok": True})
+
+    before = _version_of(check_holding_a_logger)
+    logger.setLevel(logging.CRITICAL)
+    logger.addHandler(logging.NullHandler())
+
+    assert _version_of(check_holding_a_logger) == before
+
+
+def _builtin_check_names() -> list[str]:
+    """Every check function hflow.checks defines, discovered rather than
+    listed, so a newly added built-in is guarded without editing this file."""
+    return sorted(
+        name
+        for name in dir(hflow.checks)
+        if not name.startswith("_")
+        and callable(getattr(hflow.checks, name))
+        and getattr(getattr(hflow.checks, name), "__module__", "") == "hflow.checks"
+    )
+
+
+@pytest.mark.parametrize("builtin_name", _builtin_check_names())
+def test_no_builtin_check_leaves_part_of_itself_undescribed(builtin_name: str) -> None:
+    """Every built-in's version must cover ALL the code it reaches.
+
+    The walk degrades rather than refusing when it meets state it cannot
+    describe, which is right for a user's pipeline and wrong for hflow's own
+    code: a marker here means someone can edit the helper below it and no
+    version will move. That gap is invisible in a hash, which is why this
+    asserts over the payload -- it is the regression this whole change is
+    about, one level further down.
+    """
+    builtin = getattr(hflow.checks, builtin_name)
+    payload = step_identity_payload(builtin_name, builtin, False, frozenset(), None)
+
+    assert UNDESCRIBED_CONFIGURATION_KEY not in json.dumps(payload)
+
+
+def test_step_version_degrades_instead_of_refusing_over_a_helpers_private_state() -> None:
+    """A user's helper may hold anything; registration must still work.
+
+    The step's OWN captured state stays strict (see the opaque-partial test
+    below) -- this is only about state one call further down, where refusing
+    would make an unrelated helper's internals fatal to registering a step
+    that is perfectly describable itself.
+    """
+    payload = step_identity_payload(
+        "over-opaque-helper", _check_over_an_opaque_helper, False, frozenset(), None
+    )
+
+    assert UNDESCRIBED_CONFIGURATION_KEY in json.dumps(payload)
+    assert _version_of(_check_over_an_opaque_helper)
+
+
+def test_step_version_does_not_descend_into_a_dependency() -> None:
+    """A step is not re-versioned by an unrelated release of what it imports.
+
+    The walk stops at the first-party boundary. Following a dependency's
+    internals would restore exactly the coupling ``hflow.behavior`` removed:
+    a numpy or scipy upgrade that changed nothing a step observes would still
+    invalidate every corpus. The dependency's own source is still read, so
+    swapping which function is called is caught -- only its private internals
+    are out of scope.
+    """
+    dependency = ModuleType("vendor_analytics")
+    exec(
+        "def _private_internal(value):\n"
+        "    return value + 1\n"
+        "def public_entry_point(value):\n"
+        "    return _private_internal(value)\n",
+        dependency.__dict__,
+    )
+    public_entry_point = dependency.public_entry_point
+
+    def check_over_a_dependency(_episode: hflow.Episode) -> hflow.CheckResult:
+        return hflow.CheckResult(verdict=public_entry_point(1) > 0)
+
+    assert public_entry_point.__module__ == "vendor_analytics"
+    before = _version_of(check_over_a_dependency)
+    exec(
+        "def _private_internal(value):\n    return value * 1000\n",
+        dependency.__dict__,
+    )
+
+    assert _version_of(check_over_a_dependency) == before
 
 
 def test_declared_step_version_supports_opaque_callable() -> None:

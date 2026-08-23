@@ -17,6 +17,14 @@ import numpy as np
 
 import hflow
 
+# Imported as functions, not reached as ``hflow.checks.x`` attributes: a step's
+# version content-hashes the functions it NAMES (and, transitively, the hflow
+# code they call), while a module contributes only its name. Spelling it this
+# way is what makes "the built-in changed" show up as a new step version rather
+# than as new rows under the old one.
+from hflow.checks import timestamp_regularity
+from hflow.ffmpeg import frame_stats
+
 
 def check_joint_smoothness(joints: np.ndarray, rate_hz: float) -> dict[str, float]:
     velocities = np.abs(np.diff(joints, axis=0)) * rate_hz
@@ -38,12 +46,12 @@ def joint_smoothness(ep: hflow.Episode) -> hflow.CheckResult:
 
 @app.check()
 def timestamps(ep: hflow.Episode) -> hflow.CheckResult:
-    return hflow.checks.timestamp_regularity(ep, tolerance_s=0.005)
+    return timestamp_regularity(ep, tolerance_s=0.005)
 
 
 @app.check(critical=True)
 def camera_blackout(ep: hflow.Episode) -> hflow.CheckResult:
-    stats = hflow.ffmpeg.frame_stats(ep.video("wrist_cam"))
+    stats = frame_stats(ep.video("wrist_cam"))
     return hflow.CheckResult(
         measurements={"black_pct": stats.black_frame_pct},
         verdict=stats.black_frame_pct < 50.0,

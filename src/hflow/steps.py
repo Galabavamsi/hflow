@@ -12,8 +12,11 @@ import functools
 import hashlib
 import inspect
 import json
+import logging
 import math
+import re
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum, StrEnum
 from fnmatch import fnmatchcase
@@ -393,10 +396,43 @@ def compute_check_version(
     A ``gate`` arrives from registration rather than from the function, so it
     is folded in here: tuning a threshold has to move the version, or two
     policies share one and curation can no longer pin either.
+
+    The walk into referenced code is transitive across first-party modules
+    (see :class:`_IdentityScope`), so a constant or a parser one call deeper
+    than the step still moves the step's version.
+    """
+    identity = json.dumps(
+        step_identity_payload(
+            name, function, critical, requires, uses, declared_version, gate=gate
+        ),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(identity.encode()).hexdigest()[:12]
+
+
+def step_identity_payload(
+    name: str,
+    function: Callable[..., object],
+    critical: bool,
+    requires: frozenset[str],
+    uses: str | None,
+    declared_version: str | None = None,
+    *,
+    gate: "Gate | None" = None,
+) -> dict[str, VersionIdentityValue]:
+    """Everything :func:`compute_check_version` hashes, before hashing it.
+
+    Separate from the hash so the description can be inspected rather than
+    only compared. A hash answers "did this change"; only the payload answers
+    "what does this version actually cover", which is what
+    ``UNDESCRIBED_CONFIGURATION_KEY`` makes checkable -- a gap in the walk is
+    otherwise invisible until someone edits the code it failed to read.
     """
     if declared_version is not None and not declared_version:
         raise ValueError(f"declared step version must not be empty for step {name!r}")
 
+    scope = _identity_scope_for(function)
     implementation_identity = _callable_implementation_identity(
         function,
         allow_opaque=declared_version is not None,
@@ -405,27 +441,84 @@ def compute_check_version(
     if declared_version is not None:
         behavior_configuration = {"declared_version": declared_version}
     else:
-        behavior_configuration = _callable_behavior_configuration(function)
+        behavior_configuration = _callable_behavior_configuration(function, scope=scope)
 
-    identity = json.dumps(
-        {
-            "name": name,
-            "critical": critical,
-            "requires": sorted(requires),
-            "uses": uses,
-            "implementation": implementation_identity,
-            "configuration": behavior_configuration,
-            # Present only when a gate is declared, like transform.py's
-            # resample_policy: an unconditional key would re-version every
-            # check, enrichment, and derived channel -- and derived-channel
-            # versions reach pipeline_version, which is stamped inside the
-            # bytes episode_id hashes. One new key would restamp every corpus.
-            **({"gate": _stable_version_identity_value(gate)} if gate is not None else {}),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(identity.encode()).hexdigest()[:12]
+    return {
+        "name": name,
+        "critical": critical,
+        "requires": sorted(requires),
+        "uses": uses,
+        "implementation": implementation_identity,
+        "configuration": behavior_configuration,
+        # Present only when a gate is declared, like transform.py's
+        # resample_policy: an unconditional key would re-version every
+        # check, enrichment, and derived channel -- and derived-channel
+        # versions reach pipeline_version, which is stamped inside the
+        # bytes episode_id hashes. One new key would restamp every corpus.
+        **({"gate": _stable_version_identity_value(gate, scope)} if gate is not None else {}),
+    }
+
+
+# Marks a point where the identity walk could not describe a transitively
+# reached helper's own state and recorded its NAME instead. Named so the gap
+# is greppable in a payload rather than silent: hflow's own built-ins must
+# never produce one (tests/test_processing_regressions.py pins that), because
+# a marker here means editing the code below it would not move a version.
+UNDESCRIBED_CONFIGURATION_KEY = "undescribed_configuration_of"
+
+
+@dataclass(frozen=True)
+class _IdentityScope:
+    """How far a step's identity follows the code that step calls.
+
+    A step hash covers the source of every function the step NAMES, but until
+    this scope existed it stopped there: editing a constant or a parser one
+    call deeper changed what the step measured while its version stood still,
+    and the new rows appended under the old version -- two behaviors sharing
+    one identity, which is the failure this whole module exists to prevent.
+    The built-ins made that concrete, ``camera_signal_quality`` naming
+    ``frame_stats`` while the instrument's own parsing sat a level below.
+
+    ``first_party_roots`` bounds what "deeper" may mean: hflow's own code,
+    plus the top-level package the step itself is defined in (so a pipeline's
+    private helpers count, wherever the author put them). A DEPENDENCY is
+    deliberately not followed -- folding numpy's source into a step version
+    would re-version a corpus on an unrelated numpy release, which is exactly
+    the release-number coupling :mod:`hflow.behavior` removed.
+
+    ``visited`` terminates the walk on recursion, direct or mutual, and keeps
+    a diamond from being described twice.
+    """
+
+    first_party_roots: frozenset[str]
+    visited: frozenset[str] = frozenset()
+
+    def follows(self, function: object) -> bool:
+        module_name = getattr(function, "__module__", None)
+        if not isinstance(module_name, str) or not module_name:
+            return False
+        return module_name.partition(".")[0] in self.first_party_roots
+
+    def entered(self, identity_key: str) -> "_IdentityScope":
+        return _IdentityScope(self.first_party_roots, self.visited | {identity_key})
+
+
+def _identity_key(function: object) -> str:
+    """A stable name for one function, for cycle detection and for naming it
+    in the hash when its configuration cannot be described."""
+    module_name = getattr(function, "__module__", None) or "?"
+    qualified_name = getattr(function, "__qualname__", None) or "?"
+    return f"{module_name}.{qualified_name}"
+
+
+def _identity_scope_for(function: Callable[..., object]) -> _IdentityScope:
+    """The first-party roots for one step: hflow, plus the step's own package."""
+    target: object = function.func if isinstance(function, functools.partial) else function
+    module_name = getattr(target, "__module__", None)
+    roots = {"hflow"}
+    if isinstance(module_name, str) and module_name:
+        roots.add(module_name.partition(".")[0])
+    return _IdentityScope(first_party_roots=frozenset(roots))
 
 
 def _callable_implementation_identity(
@@ -477,32 +570,52 @@ def _code_identity(code: CodeType) -> VersionIdentityValue:
 
 def _callable_behavior_configuration(
     function: Callable[..., object],
+    *,
+    scope: _IdentityScope | None = None,
 ) -> VersionIdentityValue:
     configuration: dict[str, VersionIdentityValue] = {}
     if isinstance(function, functools.partial):
-        configuration["partial_args"] = _stable_version_identity_value(function.args)
-        configuration["partial_keywords"] = _stable_version_identity_value(function.keywords)
+        configuration["partial_args"] = _stable_version_identity_value(function.args, scope)
+        configuration["partial_keywords"] = _stable_version_identity_value(function.keywords, scope)
     elif inspect.isfunction(function) or inspect.ismethod(function):
         closure_variables = inspect.getclosurevars(function)
-        configuration["nonlocals"] = _stable_version_identity_value(closure_variables.nonlocals)
-        configuration["globals"] = _stable_version_identity_value(closure_variables.globals)
+        configuration["nonlocals"] = _stable_version_identity_value(
+            closure_variables.nonlocals, scope
+        )
+        configuration["globals"] = _stable_version_identity_value(closure_variables.globals, scope)
         configuration["defaults"] = _stable_version_identity_value(
-            getattr(function, "__defaults__", None)
+            getattr(function, "__defaults__", None), scope
         )
         configuration["keyword_defaults"] = _stable_version_identity_value(
-            getattr(function, "__kwdefaults__", None)
+            getattr(function, "__kwdefaults__", None), scope
         )
     else:
         try:
             callable_state = vars(function)
         except TypeError:
             callable_state = {}
-        configuration["callable_state"] = _stable_version_identity_value(callable_state)
+        configuration["callable_state"] = _stable_version_identity_value(callable_state, scope)
     return configuration
 
 
-def _stable_version_identity_value(value: object) -> VersionIdentityValue:
-    """Convert configuration to deterministic JSON or refuse opaque state."""
+def _stable_version_identity_value(
+    value: object, scope: _IdentityScope | None = None
+) -> VersionIdentityValue:
+    """Convert configuration to deterministic JSON or refuse opaque state.
+
+    ``scope`` carries the first-party traversal; without one this describes a
+    referenced function by its source alone, which is what callers outside
+    step versioning want.
+    """
+    # Unwrap decorators before deciding what a value is. A memoised helper is
+    # its wrapped function plus a cache, and the cache changes no behavior a
+    # step can observe -- so hashing the function underneath is both correct
+    # and the difference between versioning a step and refusing to register
+    # it (hflow.ffmpeg._binary memoises the binary probes the instrument
+    # calls). inspect.unwrap raises on a __wrapped__ cycle; keep the wrapper.
+    if not isinstance(value, type) and callable(value) and hasattr(value, "__wrapped__"):
+        with suppress(ValueError):
+            value = inspect.unwrap(value)
     if isinstance(value, Enum):
         return {
             "enum_type": f"{type(value).__module__}.{type(value).__qualname__}",
@@ -514,6 +627,20 @@ def _stable_version_identity_value(value: object) -> VersionIdentityValue:
         return {"bytes_sha256": hashlib.sha256(value).hexdigest()}
     if isinstance(value, Path):
         return {"path": str(value)}
+    if isinstance(value, re.Pattern):
+        # A compiled pattern IS behavior, and a common way to express it: the
+        # ffmpeg instrument parses its output with two module-level patterns,
+        # so editing one changes what every camera check measures. Described
+        # by the pattern and its flags -- the compiled object is opaque, but
+        # what it was compiled FROM is exactly the thing that can change.
+        return {"regex": value.pattern, "regex_flags": int(value.flags)}
+    if isinstance(value, logging.Logger):
+        # A logger is infrastructure a step carries, never behavior a step
+        # has. Named rather than refused, so a module that logs stays
+        # describable; its handlers and level are runtime state and must NOT
+        # reach a version, or the same code would hash differently under a
+        # different logging configuration.
+        return {"logger": value.name}
     if isinstance(value, ModuleType):
         # The module's IDENTITY, never its ``__version__``: a version number
         # is a poor proxy for "does this library compute differently", and
@@ -528,16 +655,33 @@ def _stable_version_identity_value(value: object) -> VersionIdentityValue:
     if isinstance(value, CodeType):
         return {"code": _code_identity(value)}
     if inspect.isfunction(value) or inspect.ismethod(value):
-        return {
-            "callable": f"{value.__module__}.{value.__qualname__}",
+        referenced_key = _identity_key(value)
+        identity: dict[str, VersionIdentityValue] = {
+            "callable": referenced_key,
             "implementation": _callable_implementation_identity(value),
         }
+        if scope is not None and referenced_key not in scope.visited and scope.follows(value):
+            # Follow first-party code one call further: this function's own
+            # constants, defaults and callees are part of what the step does.
+            # A value the walk cannot describe is NAMED here rather than
+            # raised on -- refusing would break registration of a step over
+            # some helper's private state, while the step's OWN captured
+            # state stays strict because that refusal is raised outside this
+            # branch (see compute_check_version). The name still moves the
+            # hash if the helper is swapped for a different one.
+            try:
+                identity["configuration"] = _callable_behavior_configuration(
+                    value, scope=scope.entered(referenced_key)
+                )
+            except (ValueError, TypeError):
+                identity["configuration"] = {UNDESCRIBED_CONFIGURATION_KEY: referenced_key}
+        return identity
     if inspect.isbuiltin(value):
         return {"builtin": f"{value.__module__}.{value.__qualname__}"}
     if isinstance(value, list | tuple):
-        return [_stable_version_identity_value(item) for item in value]
+        return [_stable_version_identity_value(item, scope) for item in value]
     if isinstance(value, set | frozenset):
-        encoded_items = [_stable_version_identity_value(item) for item in value]
+        encoded_items = [_stable_version_identity_value(item, scope) for item in value]
         return sorted(
             encoded_items,
             key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
@@ -545,8 +689,8 @@ def _stable_version_identity_value(value: object) -> VersionIdentityValue:
     if isinstance(value, dict):
         encoded_entries = [
             {
-                "key": _stable_version_identity_value(key),
-                "value": _stable_version_identity_value(item),
+                "key": _stable_version_identity_value(key, scope),
+                "value": _stable_version_identity_value(item, scope),
             }
             for key, item in value.items()
         ]
@@ -561,7 +705,7 @@ def _stable_version_identity_value(value: object) -> VersionIdentityValue:
             "dataclass_type": f"{type(value).__module__}.{type(value).__qualname__}",
             "fields": {
                 dataclass_field.name: _stable_version_identity_value(
-                    getattr(value, dataclass_field.name)
+                    getattr(value, dataclass_field.name), scope
                 )
                 for dataclass_field in fields(value)
             },

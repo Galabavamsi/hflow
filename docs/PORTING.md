@@ -90,10 +90,17 @@ check already measures every camera in a single decode pass and records freeze
 spans as `freeze:<topic>` intervals, so registering it is the whole job:
 
 ```python
-@app.check()
-def camera_health(ep: hflow.Episode) -> hflow.CheckResult:
-    return hflow.checks.camera_frame_stats(ep)
+from hflow.checks import camera_frame_stats
+
+app.check()(camera_frame_stats)
 ```
+
+Import the built-in as a function rather than reaching it as
+`hflow.checks.camera_frame_stats` inside a wrapper. A step's version
+content-hashes the functions it *names*, and transitively the hflow code those
+call, so an import by name means a change to what the check measures shows up
+as a new step version; a module reached by attribute contributes only its name,
+and the change would append rows under the old version instead.
 
 To make it *reject* episodes rather than only measure them, attach a gate at
 registration instead of computing a verdict inside the check --
@@ -223,7 +230,7 @@ The same is true outside checks entirely: canonical episodes open in Foxglove, R
 
 | Field | Type | Meaning |
 |---|---|---|
-| `measurements` | `dict[str, float \| int \| str \| bool]` | Named facts that become catalog columns (record a run with `app.test(..., record=True)`, then query with `hflow.curate()` or any Parquet reader). Name them `<topic>/<metric>_<unit>`: the topic prefix keeps two steps from claiming one key, and the unit suffix is what the workspace UI labels the value with. |
+| `measurements` | `dict[str, float \| int \| str \| bool]` | Named facts that become catalog columns (record a run with `app.test(..., record=True)`, then query with `hflow.curate()` or any Parquet reader). Name them `<topic>/<metric>_<unit>`: the topic prefix keeps two steps from claiming one key, and the unit suffix lets downstream tools label the value without guessing. |
 | `intervals` | `list[hflow.Interval]` | Labeled time spans; `Interval(start_ns, end_ns, label)` in nanoseconds of log time (the same clock as `ChannelData.timestamps`). |
 | `tags` | `list[str]` | Free-form labels routed to the catalog. |
 | `verdict` | `bool \| None` | Optional, user-owned. `None` means evidence only. `False` on a `critical` check quarantines the episode. Prefer `@app.check(gate=...)` over computing this inline: a gate is evaluated over the measurements you already returned, so a threshold aimed at a missing key cannot cost you the evidence. |
