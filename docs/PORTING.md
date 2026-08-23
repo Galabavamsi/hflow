@@ -26,7 +26,7 @@ def my_check(ep: hflow.Episode) -> hflow.CheckResult:
     return hflow.CheckResult(measurements=result)  # our line: record
 ```
 
-`@app.check()` takes `name=` (defaults to the function name), `critical=`, `requires={...}` (capability set, e.g. `{"gpu"}`), `uses="alias"` (a named endpoint; see the VLM section), and optional `version=`. Step identity automatically includes source, defaults, and captured stable configuration such as numeric thresholds. Pass an explicit `version=` for opaque client objects or external model configuration the SDK cannot inspect deterministically. Checks that declare no resources run before checks that do, so cheap integrity checks gate expensive model calls. Today `requires`/`uses` record intent, order steps, and let preflight verify named endpoints are configured; they do **not** route the step to a particular worker or GPU pool (per-step compute routing is [deferred](./ARCHITECTURE.md#implementation-status)) -- a bring-your-own Airflow deployment arranges those resources itself.
+`@app.check()` takes `name=` (defaults to the function name), `critical=`, `requires={...}` (capability set, e.g. `{"gpu"}`), `uses="alias"` (a named endpoint; see the VLM section), `gate=` (a declarative accept policy the runner evaluates over what the check returned), and optional `version=`. Step identity automatically includes source, defaults, and captured stable configuration such as numeric thresholds. Pass an explicit `version=` for opaque client objects or external model configuration the SDK cannot inspect deterministically. Checks that declare no resources run before checks that do, so cheap integrity checks gate expensive model calls. Today `requires`/`uses` record intent, order steps, and let preflight verify named endpoints are configured; they do **not** route the step to a particular worker or GPU pool (per-step compute routing is [deferred](./ARCHITECTURE.md#implementation-status)) -- a bring-your-own Airflow deployment arranges those resources itself.
 
 Every step is called with exactly one argument, an `Episode`, so `@app.check()`, `@app.enrich()`, and `@app.derive()` refuse a function the runtime could never call: one with a required parameter beyond the episode, or with no positional slot to receive it. That refusal happens at registration, not once per episode, and the error shows the wrapper form to use instead. To pass configuration, bind it in a wrapper (`return action_rate(ep, topics=[...])`) rather than adding a parameter.
 
@@ -84,23 +84,34 @@ def sharpness(ep: hflow.Episode) -> hflow.CheckResult:
 
 `ep.video()` remuxes the camera's in-band H.264 into a plain MP4 with **no re-encode**: the pixels your check measures are the pixels in the episode. Camera names resolve by full topic or unique substring: `"wrist_cam"` finds `/wrist_cam/compressed`; with a single camera you can omit the argument.
 
-Running your own ffmpeg against that file is endorsed usage, not a workaround:
+For the common camera integrity questions -- blackout, freeze, exposure, frame
+count versus the rate the stream claims -- do not write this one. The packaged
+check already measures every camera in a single decode pass and records freeze
+spans as `freeze:<topic>` intervals, so registering it is the whole job:
 
 ```python
+@app.check()
+def camera_health(ep: hflow.Episode) -> hflow.CheckResult:
+    return hflow.checks.camera_frame_stats(ep)
+```
+
+To make it *reject* episodes rather than only measure them, attach a gate at
+registration instead of computing a verdict inside the check --
+[enabling the built-in checks](./how-to/enable-built-in-checks.md#gate-on-one)
+covers the shipped gates, writing your own, and why registration order matters.
+Gating that way keeps the evidence: a verdict computed inside the check and
+returned as a fresh `CheckResult(verdict=...)` throws away the measurements the
+instrument already produced.
+
+Below the packaged check are the raw instrument and plain ffmpeg, for the
+questions it does not answer. Both are endorsed usage, not workarounds:
+
+```python
+stats = hflow.ffmpeg.frame_stats(ep.video("wrist_cam"))  # one decode pass
+# stats.black_frame_pct, stats.freeze_intervals, stats.luma_avg_mean, ...
+
 subprocess.run(["ffmpeg", "-i", str(ep.video("wrist_cam")), ...], check=True)
 ```
-
-For the common camera integrity questions (blackout, freeze, exposure) the built-in single-decode instrument already exists (one pass, one shared frame denominator):
-
-```python
-stats = hflow.ffmpeg.frame_stats(ep.video("wrist_cam"))
-# stats.black_frame_pct, stats.freeze_intervals, stats.luma_avg_mean, ...
-```
-
-The packaged check `hflow.checks.camera_frame_stats(ep)` wraps that instrument
-over every camera, adds the frame-count-vs-expected-rate comparison, and
-returns the results (freeze spans included, as `freeze:<topic>` intervals) as
-a ready-to-register `CheckResult`.
 
 ## Dialect 3: JPEG frames and your own VLM client
 
@@ -212,12 +223,17 @@ The same is true outside checks entirely: canonical episodes open in Foxglove, R
 
 | Field | Type | Meaning |
 |---|---|---|
-| `measurements` | `dict[str, float \| int \| str \| bool]` | Named facts. Keys are flat strings and become catalog columns (record a run with `app.test(..., record=True)`, then query with `hflow.curate()` or any Parquet reader); a `topic/metric` convention keeps them queryable. |
+| `measurements` | `dict[str, float \| int \| str \| bool]` | Named facts that become catalog columns (record a run with `app.test(..., record=True)`, then query with `hflow.curate()` or any Parquet reader). Name them `<topic>/<metric>_<unit>`: the topic prefix keeps two steps from claiming one key, and the unit suffix is what the workspace UI labels the value with. |
 | `intervals` | `list[hflow.Interval]` | Labeled time spans; `Interval(start_ns, end_ns, label)` in nanoseconds of log time (the same clock as `ChannelData.timestamps`). |
 | `tags` | `list[str]` | Free-form labels routed to the catalog. |
-| `verdict` | `bool \| None` | Optional, user-owned. `None` means evidence only. `False` on a `critical` check quarantines the episode. |
+| `verdict` | `bool \| None` | Optional, user-owned. `None` means evidence only. `False` on a `critical` check quarantines the episode. Prefer `@app.check(gate=...)` over computing this inline: a gate is evaluated over the measurements you already returned, so a threshold aimed at a missing key cannot cost you the evidence. |
 
-Every recorded result also carries the check's version (a content hash of its configuration and source), so re-running a changed check appends new-version rows instead of silently overwriting old ones.
+One measurement key may have only one owner, and the runner refuses a run where
+two steps claim the same one --
+[the naming rules](./CATALOG.md#naming-measurement-keys) explain why a shared
+key is unrecoverable rather than merely untidy.
+
+Every recorded result also carries the check's version (a content hash of its configuration and source, including any gate you attached), so re-running a changed check -- or a retuned threshold -- appends new-version rows instead of silently overwriting old ones.
 
 ## The dev loop
 
@@ -265,6 +281,8 @@ both paths.
 ## See also
 
 - [Documentation home](./README.md): choose a tutorial, how-to guide, reference, or explanation
+- [Enable the built-in quality checks](./how-to/enable-built-in-checks.md): the fifteen packaged checks, and how to gate on one
+- [Query quality evidence and create a manifest](./CATALOG.md): where measurements land, and the naming rules for keys
 - [Runnable examples](../examples/README.md): commands, prerequisites, and expected output
 - [OpenAI vision how-to](./how-to/call-openai-vision.md): a complete Responses API check
 - [How HFlow fits the robotics data stack](./INTEGRATIONS.md): which responsibilities stay in HFlow and which stay in surrounding tools
