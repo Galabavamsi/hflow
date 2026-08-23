@@ -43,6 +43,14 @@ from hflow.reader import (
     open_reader,
 )
 from hflow.resample import DerivedSeries, ResamplePolicy, to_grid
+from hflow.snapshot import (
+    DATASET_SNAPSHOT_FORMAT_NAME,
+    DATASET_SNAPSHOT_FORMAT_VERSION,
+    DatasetSnapshotReport,
+    RetainedDatasetSnapshotBackup,
+    SnapshotMediaMode,
+    export_dataset_snapshot,
+)
 from hflow.steps import (
     RUN_PROFILES,
     Aggregation,
@@ -80,6 +88,8 @@ except PackageNotFoundError:  # running from a source tree without an install
     __version__ = "0.0.0"
 
 __all__ = [
+    "DATASET_SNAPSHOT_FORMAT_NAME",
+    "DATASET_SNAPSHOT_FORMAT_VERSION",
     "RUN_PROFILES",
     "Aggregation",
     "App",
@@ -95,6 +105,7 @@ __all__ = [
     "CheckStatus",
     "Comparison",
     "CurationReport",
+    "DatasetSnapshotReport",
     "DerivedChannel",
     "DerivedChannelManifest",
     "DerivedSeries",
@@ -122,6 +133,8 @@ __all__ = [
     "RegisteredCheck",
     "RegisteredEnrichment",
     "ResamplePolicy",
+    "RetainedDatasetSnapshotBackup",
+    "SnapshotMediaMode",
     "Stage",
     "StaleEpisode",
     "StepKind",
@@ -138,6 +151,7 @@ __all__ = [
     "curate",
     "diagnose",
     "evaluate_gate",
+    "export_dataset_snapshot",
     "fetch_uri",
     "ffmpeg",
     "import_pipeline_application",

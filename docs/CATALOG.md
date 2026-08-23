@@ -332,6 +332,14 @@ the same way. The only reserved file is the `format_version` marker at the
 catalog root (currently `1`); a breaking layout change bumps it, and readers
 refuse loudly on mismatch.
 
+When a person or another tool needs a selected snapshot rather than the
+append-only catalog history, use
+[`hflow export snapshot`](./how-to/export-dataset-snapshot.md). It writes
+samples, latest typed measurements, artifact media index, step runs, tags, and
+intervals as a portable directory of Parquet tables. Artifact URIs can be
+preserved or copied into the directory; no viewer-specific package is
+required.
+
 ## Troubleshooting
 
 **`<location> is not a catalog root`.** Pass the catalog location created

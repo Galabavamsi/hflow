@@ -1,10 +1,11 @@
 """Command-line entry point.
 
-Subcommands: ``curate``, ``stale``, ``doctor``, ``manifest``, the Compose
-runtime family ``up``/``down``/``ingest``/``status``, ``deploy`` for
-bring-your-own Airflow, and ``serve`` for the workspace HTTP server (a
-separate ``hflow-server`` package, imported only when invoked). Everything
-the CLI does is a thin call into the library: no behavior lives only here.
+Subcommands: ``curate``, ``export snapshot``, ``stale``, ``doctor``,
+``manifest``, the Compose runtime family ``up``/``down``/``ingest``/``status``,
+``deploy`` for bring-your-own Airflow, and ``serve`` for the workspace HTTP
+server (a separate ``hflow-server`` package, imported only when invoked).
+Everything the CLI does is a thin call into the library: no behavior lives
+only here.
 
 Two of these start long-running processes and they are not the same thing:
 ``up`` brings up the RUNTIME that processes episodes (an Airflow stack in
@@ -115,6 +116,57 @@ def _build_parser() -> argparse.ArgumentParser:
             f"(default: $HFLOW_DATA_ROOT/manifest.parquet, else "
             f"{DEFAULT_DATA_ROOT}/manifest.parquet)"
         ),
+    )
+
+    export_parser = subparsers.add_parser(
+        "export",
+        help="export catalog selections in portable downstream formats",
+    )
+    export_subparsers = export_parser.add_subparsers(dest="export_command", required=True)
+    snapshot_export_parser = export_subparsers.add_parser(
+        "snapshot",
+        help="write a tool-neutral Parquet dataset snapshot",
+        description=(
+            "Snapshot selected episodes, measurements, artifact media, check runs, "
+            "tags, and intervals into a local directory of standard Parquet files."
+        ),
+    )
+    snapshot_export_parser.add_argument(
+        "--catalog",
+        default=_default_catalog_location(),
+        help=(
+            "catalog directory or object-store prefix "
+            f"(default: $HFLOW_DATA_ROOT/catalog, else {DEFAULT_DATA_ROOT}/catalog)"
+        ),
+    )
+    snapshot_export_parser.add_argument(
+        "--manifest",
+        default=None,
+        help=(
+            "optional local Parquet file or object-store URL containing episode_id; "
+            "without it, export every latest catalog episode"
+        ),
+    )
+    snapshot_export_parser.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        required=True,
+        help="local directory to create",
+    )
+    snapshot_export_parser.add_argument(
+        "--media",
+        choices=("references", "copy"),
+        default="references",
+        help=(
+            "preserve artifact URIs, or copy artifacts under the export's assets/ "
+            "directory (default: references)"
+        ),
+    )
+    snapshot_export_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="atomically replace an existing export directory",
     )
 
     stale_parser = subparsers.add_parser(
@@ -358,7 +410,7 @@ def _build_parser() -> argparse.ArgumentParser:
     serve_parser = subparsers.add_parser(
         "serve",
         help=(
-            "serve this workspace over HTTP: a JSON API over the catalog, and any "
+            "serve this workspace over HTTP: a REST API over the catalog, and any "
             "UI assets installed (requires the hflow-server package). Distinct from "
             "`up`, which starts the runtime that PROCESSES episodes -- this only "
             "reads the data root, and can trigger a run on a runtime that exists."
@@ -390,7 +442,7 @@ def _build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument(
         "--read-only",
         action="store_true",
-        help="viewer mode: hide and refuse manifest pinning, saved-query edits, and run triggering",
+        help="refuse manifest pinning, saved-query edits, and run triggering",
     )
     serve_parser.add_argument(
         "--pipeline",
@@ -740,6 +792,24 @@ def _command_curate(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _command_export_snapshot(arguments: argparse.Namespace) -> int:
+    from hflow.snapshot import export_dataset_snapshot
+
+    try:
+        report = export_dataset_snapshot(
+            arguments.catalog,
+            arguments.output,
+            manifest=arguments.manifest,
+            media_mode=arguments.media,
+            overwrite=arguments.overwrite,
+        )
+    except (ValueError, FileNotFoundError, FileExistsError, NotADirectoryError) as error:
+        print(f"export snapshot: {error}", file=sys.stderr)
+        return 2
+    print(report.summary())
+    return 0
+
+
 def _command_doctor(arguments: argparse.Namespace) -> int:
     # Findings, not exceptions, across files as well: an unreadable path is a
     # finding about the corpus, reported in place, so a batch run never loses
@@ -796,6 +866,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if arguments.command == "curate":
         return _command_curate(arguments)
+    if arguments.command == "export":
+        if arguments.export_command == "snapshot":
+            return _command_export_snapshot(arguments)
+        raise AssertionError(f"unhandled export command {arguments.export_command!r}")
     if arguments.command == "stale":
         return _command_stale(arguments)
     if arguments.command == "doctor":
