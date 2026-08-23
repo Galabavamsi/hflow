@@ -149,6 +149,15 @@ def render_deploy_bundle(config: DeployConfig, output_dir: Path | str) -> Deploy
     """
     output_directory = Path(output_dir)
     pipeline_source = Path(config.pipeline_file)
+    if pipeline_source.is_dir():
+        # Deliberately FileNotFoundError and not IsADirectoryError: the accurate
+        # class subclasses OSError, not FileNotFoundError, so an `except
+        # FileNotFoundError` stops catching it. Two such handlers sit in this
+        # call path, cli.py:560 for `up` and cli.py:601 for `deploy`, and both
+        # turn this into exit 2; thirteen more name it elsewhere under
+        # src/hflow/, and callers outside the repo are the real unknown.
+        # The errno carries the accurate text without moving the class. #100.
+        raise FileNotFoundError(errno.EISDIR, os.strerror(errno.EISDIR), str(pipeline_source))
     if not pipeline_source.is_file():
         raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(pipeline_source))
 
@@ -164,6 +173,11 @@ def render_deploy_bundle(config: DeployConfig, output_dir: Path | str) -> Deploy
     requirements_copied = False
     if config.requirements_file is not None:
         requirements_source = Path(config.requirements_file)
+        if requirements_source.is_dir():
+            # FileNotFoundError, not IsADirectoryError, for the reason above.
+            raise FileNotFoundError(
+                errno.EISDIR, os.strerror(errno.EISDIR), str(requirements_source)
+            )
         if not requirements_source.is_file():
             raise FileNotFoundError(
                 errno.ENOENT, os.strerror(errno.ENOENT), str(requirements_source)
