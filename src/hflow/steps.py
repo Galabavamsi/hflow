@@ -25,6 +25,12 @@ if TYPE_CHECKING:
     from hflow.episode import Episode
     from hflow.resample import DerivedSeries
 
+# One scalar per key, and no None. A NumPy scalar is coerced to its Python
+# equivalent at the catalog boundary; anything else is refused there, naming
+# the check and key. A check with nothing to say omits the key rather than
+# measuring None: a NULL value column means nothing stored a value, so
+# admitting None would make "not measured" and "silently dropped" the same
+# row (see #126).
 MeasurementValue = float | int | str | bool
 VersionIdentityValue: TypeAlias = (
     bool
