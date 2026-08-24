@@ -60,7 +60,7 @@ _PROMOTED_EPISODE_KEYS = ("task", "operator", "success", "embodiment")
 # below and the curation views both derive from it.
 TABLE_COLUMN_DDL: dict[str, str] = {
     "episodes": (
-        "episode_id VARCHAR, run_fingerprint VARCHAR, uri VARCHAR, "
+        "episode_id VARCHAR, run_fingerprint VARCHAR, orchestrator_run_id VARCHAR, uri VARCHAR, "
         "source_uri VARCHAR, schema_version VARCHAR, pipeline_version VARCHAR, "
         "robot_software_version VARCHAR, ffmpeg_version VARCHAR, "
         "task VARCHAR, operator VARCHAR, success VARCHAR, embodiment VARCHAR, "
@@ -509,6 +509,7 @@ class Catalog:
         quarantine_tags: Sequence[str] = (),
         source_uri: str | None = None,
         uri: str | None = None,
+        orchestrator_run_id: str | None = None,
     ) -> AppendResult:
         """Record one outcome; replaying that exact outcome is idempotent.
 
@@ -516,7 +517,29 @@ class Catalog:
         canonical file -- pass the published object URL for bucket data
         roots; ``None`` records the resolved local path (the file's real
         address for local roots).
+
+        ``orchestrator_run_id`` records WHICH orchestrated run produced this row.
+        It is provenance, not identity: it is deliberately absent from
+        :func:`_run_fingerprint`, because that hash exists so replaying an
+        identical outcome is a no-op, and folding a per-run value into it
+        would make every rerun append a duplicate of data already stored.
+
+        The consequence is worth stating rather than discovering. A replay
+        returns ``written=False`` above without touching the stored row, so
+        this column names the run that FIRST recorded an outcome, not every
+        run that has since produced it. That is the honest reading of an
+        append that did nothing. ``None`` (the local dev loop, any caller
+        outside the runtime) records NULL.
         """
+        # One stored representation of "no orchestrator". A blank arrives
+        # easily from an adapter reading its own environment
+        # (``os.environ.get("RUN_ID", "")``), and storing it verbatim would
+        # leave NULL and '' both meaning unorchestrated, so an IS NULL query
+        # would miss rows and a filter could match a value naming nothing.
+        # Blank-or-whitespace only: any other id is stored VERBATIM, because
+        # it has to compare equal to what the orchestrator's own API reports.
+        if orchestrator_run_id is not None and not orchestrator_run_id.strip():
+            orchestrator_run_id = None
         episode_id = content_episode_id(canonical_path)
         # One normalized shape feeds every consumer below -- the run
         # fingerprint, the replay repair pass, and the dependent-table
@@ -565,10 +588,11 @@ class Catalog:
             for table_name, column_ddl in TABLE_COLUMN_DDL.items():
                 connection.execute(f"CREATE TABLE {table_name} ({column_ddl})")
             connection.execute(
-                "INSERT INTO episodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO episodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     episode_id,
                     run_fingerprint,
+                    orchestrator_run_id,
                     uri if uri is not None else str(canonical_path.resolve()),
                     source_uri,
                     stamps.schema_version,
