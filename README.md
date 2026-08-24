@@ -8,7 +8,7 @@
 
 <h1 align="center">HFlow</h1>
 
-<p align="center"><strong>Open source SDK for building Physical AI data pipelines</strong></p>
+<p align="center"><strong>Open source SDK for scalable multimodal data pipelines in robotics and physical AI</strong></p>
 
 <p align="center">
   <a href="https://www.ycombinator.com/companies/hebbian-robotics">
@@ -22,9 +22,12 @@
   </a>
 </p>
 
-HFlow provides reusable infrastructure for physical AI data pipelines. Add your
-existing Python transformations, quality checks, labels, and enrichments; HFlow
-handles the orchestration, storage, versioning, and curation around them.
+Hebbian Robotics (YC S26) is building HFlow, an open source SDK for scalable
+multimodal data pipelines in robotics and physical AI. It makes production-grade
+data tooling and practices, typically developed inside large robotics data teams,
+accessible to anyone. Add your existing Python transformations, quality checks,
+labels, and enrichments; HFlow handles the orchestration, storage, versioning,
+and curation around them.
 
 HFlow stamps each processed episode with its provenance, renders the pipeline
 as a graph, and records metadata and quality evidence in a queryable catalog.
@@ -40,7 +43,7 @@ episode.
 
 > **Status: pre-v1, with the core lifecycle working end to end.** HFlow is ready to try locally. See [what is implemented](https://github.com/Hebbian-Robotics/hflow/blob/main/docs/ARCHITECTURE.md#implementation-status) and [open issues](https://github.com/Hebbian-Robotics/hflow/issues) for current details and remaining work.
 
-**Help advance open robotics and Physical AI.** [Contributors are welcome](https://github.com/Hebbian-Robotics/hflow/blob/main/CONTRIBUTING.md), and no robot hardware is required.
+**Help grow the open robotics community.** [Star the repository](https://github.com/Hebbian-Robotics/hflow), share it with your network, or [contribute](https://github.com/Hebbian-Robotics/hflow/blob/main/CONTRIBUTING.md). Our goal is an open source community where anyone can participate in building the future of robotics. No robot hardware is required to contribute.
 
 | | HFlow's boundary |
 | --- | --- |

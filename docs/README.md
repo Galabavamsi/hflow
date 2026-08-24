@@ -1,6 +1,8 @@
 # HFlow documentation
 
-HFlow turns landed physical-AI recordings into canonical, quality-checked,
+HFlow is an open source SDK for scalable multimodal data pipelines in robotics
+and physical AI. It brings production-grade data tooling and practices to teams
+of any size, turning landed recordings into canonical, quality-checked,
 queryable datasets. Start with the path that matches what you are trying to do.
 
 ```text

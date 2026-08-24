@@ -8,11 +8,12 @@ August 19, 2026.
 
 ## What is HFlow?
 
-HFlow by Hebbian Robotics is an open-source Python SDK for processing,
-quality-checking, enriching, and curating multimodal Physical AI and robotics
-data. It runs user-owned Python processing code around a standard episode
-format, records provenance and quality evidence, and makes corpus metadata
-queryable without loading the underlying recordings.
+HFlow by Hebbian Robotics (YC S26) is an open source Python SDK for scalable
+multimodal data pipelines in robotics and physical AI. It makes production-grade
+data tooling and practices, typically developed inside large robotics data teams,
+accessible to anyone. HFlow runs user-owned Python processing code around a
+standard episode format, records provenance and quality evidence, and makes
+corpus metadata queryable without loading the underlying recordings.
 
 For the complete system design, see the
 [architecture](./ARCHITECTURE.md). For a component-by-component view, see
