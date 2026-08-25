@@ -11,7 +11,22 @@ Views registered on the connection:
 
 - ``episodes_raw``, ``check_runs``, ``measurements``, ``tags``,
   ``intervals`` -- the long tables, exactly as stored.
-- ``episodes_latest`` -- one row per episode_id (most recent append).
+- ``episodes_latest`` -- one row per SOURCE RECORDING (most recent append).
+  Ranking per source rather than per ``episode_id`` is what makes this the
+  current corpus: reprocessing rewrites the canonical file and therefore
+  mints a new content-addressed ``episode_id``, so a per-episode ranking
+  keeps every superseded generation alive and a plain ``SELECT`` over the
+  wide view double-counts every reprocessed recording. Both generations even
+  share one ``uri``, because publication overwrites in place, so the older
+  row's ``episode_id`` no longer hashes the bytes at its own address.
+  Re-running only a CHECK does not change the canonical bytes: that appends
+  a second ``run_fingerprint`` under one ``episode_id``, and both rankings
+  agree on it. ``coalesce`` covers rows that recorded no ``source_uri``
+  (optional on ``Catalog.append_episode``, so a direct
+  ``write_canonical_episode`` caller can omit it): such an episode is its
+  own source. This view is the only place that expression lives -- every
+  consumer, ``stale_episodes`` included, reads it rather than re-deriving
+  the window.
 - ``measurements_latest`` -- one row per (episode_id, key), most recent by
   the OWNING episode's recorded_at (joined in), not the measurement row's
   own -- the latter can go stale independently of the episode it belongs to.
@@ -39,7 +54,8 @@ import duckdb
 
 from hflow.catalog import EPISODES_VIEW_STATUS_COLUMN, TABLE_COLUMN_DDL
 from hflow.format import CATALOG_FORMAT_VERSION
-from hflow.steps import CheckStatus
+from hflow.ingest_ledger import INGEST_FAILURES_COLUMN_DDL, INGEST_FAILURES_TABLE_NAME
+from hflow.steps import RAN_STATUSES
 from hflow.storage import (
     BucketStorageRoot,
     LocalStorageRoot,
@@ -48,17 +64,42 @@ from hflow.storage import (
     parse_storage_root,
 )
 
-_LONG_TABLE_NAMES = ("episodes_raw", "check_runs", "measurements", "tags", "intervals")
+_LONG_TABLE_NAMES = (
+    "episodes_raw",
+    "check_runs",
+    "measurements",
+    "tags",
+    "intervals",
+    INGEST_FAILURES_TABLE_NAME,
+)
 _TABLE_DIRECTORIES = {
     "episodes_raw": "episodes",
     "check_runs": "check_runs",
     "measurements": "measurements",
     "tags": "tags",
     "intervals": "intervals",
+    # The complement of `episodes`: attempts that produced no row there. Not a
+    # member of catalog.TABLE_COLUMN_DDL, whose machinery assumes every table
+    # is keyed by (episode_id, run_fingerprint), so it is registered for
+    # reading here and written by its own module.
+    INGEST_FAILURES_TABLE_NAME: INGEST_FAILURES_TABLE_NAME,
 }
 
-# Statuses that mean "the check actually ran on this episode" for coverage.
-_RAN_STATUSES = (CheckStatus.PASSED.value, CheckStatus.FAILED.value, CheckStatus.MEASURED.value)
+# "The check actually ran on this episode", owned by hflow.steps because
+# dataset membership asks the same question and the two answers must agree.
+_RAN_STATUSES = tuple(status.value for status in RAN_STATUSES)
+
+
+def _column_ddl_for(directory_name: str) -> str:
+    """The stored columns of one catalog directory, for an EMPTY relation.
+
+    An empty table still has to be definable, or every downstream view breaks
+    on a workspace that has not recorded that kind of row yet. The episode
+    tables' shapes are the catalog's; the failure ledger's is its own.
+    """
+    if directory_name == INGEST_FAILURES_TABLE_NAME:
+        return INGEST_FAILURES_COLUMN_DDL
+    return TABLE_COLUMN_DDL[directory_name]
 
 
 @dataclass(frozen=True)
@@ -250,7 +291,7 @@ def _open_connection_over_root(
         else:
             # An empty catalog table: an empty relation with the real schema
             # keeps every downstream view and query definable.
-            connection.execute(f"CREATE TABLE {view_name} ({TABLE_COLUMN_DDL[directory_name]})")
+            connection.execute(f"CREATE TABLE {view_name} ({_column_ddl_for(directory_name)})")
 
     if constrained:
         _apply_connection_constraints(connection, list(writable_directories))
@@ -260,7 +301,7 @@ def _open_connection_over_root(
         CREATE VIEW episodes_latest AS
         SELECT * EXCLUDE (row_rank) FROM (
             SELECT *, row_number() OVER (
-                PARTITION BY episode_id
+                PARTITION BY coalesce(source_uri, episode_id)
                 ORDER BY recorded_at DESC, run_fingerprint DESC
             ) AS row_rank FROM episodes_raw
         ) WHERE row_rank = 1
@@ -362,16 +403,28 @@ def _stage_manifest_and_count(
 
 
 def _collect_coverage(connection: duckdb.DuckDBPyConnection) -> tuple[int, list[CheckCoverage]]:
-    (total_episodes,) = connection.execute(
-        "SELECT count(DISTINCT episode_id) FROM episodes_raw"
-    ).fetchone() or (0,)
+    # Both halves count CURRENT generations only. Off episodes_raw the
+    # denominator grows by one every time a recording is reprocessed, while
+    # the numerator keeps crediting check runs from canonicals that have
+    # since been superseded -- so a reprocessed corpus reports coverage over
+    # a corpus that does not exist. Coverage is the honesty feature (a
+    # statistic over half a delivery must not look like a statistic over all
+    # of it), so it is the last place to count a stale denominator.
+    (total_episodes,) = connection.execute("SELECT count(*) FROM episodes_latest").fetchone() or (
+        0,
+    )
     if total_episodes == 0:
         return 0, []
     status_list = ", ".join(_quote_sql_string(status) for status in _RAN_STATUSES)
+    # Joined on episode_id alone, NOT on (episode_id, run_fingerprint): a
+    # stage-profile rerun appends check_runs rows only for the steps that
+    # ran, under a fresh fingerprint, so matching the latest fingerprint too
+    # would report every check uncovered after any relabel pass.
     coverage_rows = connection.execute(
         f"""
         SELECT check_name, count(DISTINCT episode_id) AS episodes_ran
         FROM check_runs WHERE status IN ({status_list})
+          AND episode_id IN (SELECT episode_id FROM episodes_latest)
         GROUP BY check_name ORDER BY check_name
         """
     ).fetchall()
@@ -398,13 +451,13 @@ def stale_episodes(
     are stale against the versions you pass (``App.pipeline_version`` is the
     default source of the current one), so only those get re-ingested.
 
-    Staleness is judged per **source recording** (``source_uri``, falling
-    back to ``episode_id`` when none was recorded), on its most recent run:
+    Staleness is judged per **source recording**, on its most recent run:
     reprocessing rewrites the canonical file and therefore mints a new
     content-addressed ``episode_id``, so grouping by episode would keep
     reporting every superseded canonical forever. A source already
     reprocessed to the current versions is not stale, whatever its history
-    says.
+    says. That is exactly what ``episodes_latest`` selects, so this reads the
+    view instead of carrying its own copy of the ranking.
 
     Versions are content hashes: "stale" means *different*, never ordered
     comparison. Feed each result's ``source_uri`` back into ingestion
@@ -419,12 +472,8 @@ def stale_episodes(
             parameters.append(schema_version)
         rows = connection.execute(
             f"""
-            SELECT episode_id, uri, source_uri, pipeline_version, schema_version FROM (
-                SELECT *, row_number() OVER (
-                    PARTITION BY coalesce(source_uri, episode_id)
-                    ORDER BY recorded_at DESC, run_fingerprint DESC
-                ) AS row_rank FROM episodes_raw
-            ) WHERE row_rank = 1 AND ({predicate}) ORDER BY episode_id
+            SELECT episode_id, uri, source_uri, pipeline_version, schema_version
+            FROM episodes_latest WHERE {predicate} ORDER BY episode_id
             """,
             parameters,
         ).fetchall()

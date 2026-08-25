@@ -33,7 +33,9 @@ entry.written  # False when this exact run was already recorded
 ```
 
 One append writes one Parquet file into each of five table directories under
-`<data_root>/catalog/`, all named `<episode_id>-<run_fingerprint>.parquet`:
+`<data_root>/catalog/`, all named `<episode_id>-<run_fingerprint>.parquet`.
+A sixth directory, `ingest_failures/`, records the attempts that produced no
+append at all:
 
 | Table | One row per | Carries |
 |---|---|---|
@@ -42,6 +44,16 @@ One append writes one Parquet file into each of five table directories under
 | `measurements` | measurement key | `key`, typed value columns (`value_double`, `value_text`, `value_bool`), the producing `check_name`/`check_version` |
 | `tags` | tag | `check_name`, `tag` |
 | `intervals` | labeled time span | `label`, `start_ns`, `end_ns` |
+| `ingest_failures` | attempt that produced NO episode row | `source_uri`, `stage`, `failure_kind` (`source-missing` / `source-unreadable` / `infrastructure`), `error_type`, `message`, `pipeline_version`, `orchestrator_run_id`, `recorded_at` |
+
+`ingest_failures` is the complement of `episodes`, and exists because
+`episode_id` is a hash of canonical bytes: a recording that never
+canonicalized has nothing to hash and so cannot be an episode row at all. It
+is keyed by source rather than by episode, which is why it is not one of the
+tables above in any other sense. `failure_kind` is a heuristic and is stored
+next to the verbatim `error_type` and `message` rather than in place of them;
+anything unrecognized is `infrastructure`, never an accusation against the
+recording.
 
 Three durability rules govern writes:
 
@@ -140,8 +152,8 @@ these views registered (it is what `curate()` uses; take it and explore):
 - `episodes`: the wide view for everyday cuts. It has the latest row per
   episode, a `status` column (`'quarantined'` / `'ok'`), and **one numeric
   column per measurement key** (latest value; booleans as 0/1).
-- `episodes_raw`, `check_runs`, `measurements`, `tags`, `intervals`: the
-  long tables, exactly as stored.
+- `episodes_raw`, `check_runs`, `measurements`, `tags`, `intervals`,
+  `ingest_failures`: the long tables, exactly as stored.
 - `episodes_latest`, `measurements_latest`: one row per episode / per
   (episode, key), most recent append wins.
 
@@ -193,8 +205,41 @@ WHERE task = 'fold_napkin'
   AND black_pct < 1.0          -- measurement keys are columns; units are yours
 ```
 
-Pinning a check version (the mixed-version-corpus reality). `check_version`
-is a content hash, not ordered, so pin exact values (or filter
+For the everyday cut you do not have to write any of this. `hflow dataset
+create` asks the pipeline itself:
+
+```bash
+hflow dataset create clean
+hflow dataset create clean --print-sql   # see the policy, change nothing
+```
+
+It selects the current generation of every source recording that is not
+quarantined, was produced by this pipeline's current transform, and has every
+registered step recorded at its current version, then writes two immutable
+files: `manifests/clean-<timestamp>.parquet` (the selection, which
+`hflow export snapshot --manifest` reads) and `manifests/clean-<timestamp>.json`
+(the effective SQL, the version stamps it required, the row count, and the
+coverage). Nothing is hidden -- `--print-sql` gives you the query to edit into
+a sharper one, and `--sql` runs yours instead while keeping the artifact and
+the provenance record.
+
+Two subtleties worth knowing if you write the equivalent yourself, because
+both of them silently return an empty dataset that reads like a policy
+decision:
+
+- The policy asks whether each step **ran**, not whether it passed.
+  Evidence-only checks offer no verdict and record `measured`, so a
+  `status = 'passed'` filter selects nothing at all.
+- It counts `superseded` as settled too, not only `passed`/`failed`/`measured`.
+  A built-in you wrapped under a name of your own supersedes the automatic copy,
+  which then records `superseded` on every episode by design -- reading that as
+  an unfilled hole excludes the whole corpus. `skipped` is different and stays
+  excluded: a step skipped because a critical check quarantined the episode has
+  real work to do the moment that check is retuned. So does `error`: a crash is
+  infrastructure, so it is a retry.
+
+Pinning a check version by hand (the mixed-version-corpus reality).
+`check_version` is a content hash, not ordered, so pin exact values (or filter
 `recorded_at`), never compare with `>=`:
 
 ```sql

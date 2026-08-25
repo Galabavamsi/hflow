@@ -16,17 +16,23 @@ so the quarantine budget applies only in the meta stage, and a run where
 EVERY episode errored always fails regardless of budget.
 """
 
-import importlib.util
 import math
 import os
 import traceback
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
 from hflow.batching import plan_batches
 from hflow.catalog import QuarantineHistory
+from hflow.stage_planning import (
+    EpisodeStagePlan,
+    NoCanonicalEpisode,
+    OutstandingStages,
+    StageSelection,
+)
 from hflow.steps import IngestMode, Stage
 from hflow.storage import is_bucket_url, parse_storage_root
 
@@ -86,18 +92,20 @@ def load_pipeline_application(pipeline_path: str, app_variable: str) -> "App":
     This is the execution contract a deployment wraps its isolation around:
     the file is arbitrary user code, imported (executed) in the user venv,
     and must expose an ``hflow.App`` under ``app_variable``.
-    """
-    from hflow.app import App
 
-    spec = importlib.util.spec_from_file_location("hflow_user_pipeline", pipeline_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load user pipeline at {pipeline_path}")
-    pipeline_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(pipeline_module)
-    application = getattr(pipeline_module, app_variable, None)
-    if not isinstance(application, App):
-        raise RuntimeError(f"{pipeline_path} has no hflow.App named {app_variable!r}")
-    return application
+    A thin adapter over :func:`hflow.app.load_pipeline_application`, which
+    owns the loading itself so this path cannot drift from the CLI's and the
+    workspace UI's. The only thing that differs here is the error type: a
+    task boundary has no caller that recovers, so a failure is
+    ``RuntimeError`` rather than the ``ValueError`` the CLI catches to exit 2
+    and the server catches to degrade to an unavailable pipeline page.
+    """
+    from hflow.app import load_pipeline_application as load_application
+
+    try:
+        return load_application(pipeline_path, app_variable)
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
 
 
 def require_application_data_root(application: "App", expected_data_root: str) -> None:
@@ -202,8 +210,19 @@ def process_stage_batch(
                     quarantine_history=quarantine_history,
                     orchestrator_run_id=orchestrator_run_id,
                 )
-            except Exception:
+            except Exception as error:
                 traceback.print_exc()
+                # A source that never canonicalized has no catalog row to be,
+                # so without this the only trace of it is this traceback in
+                # whatever log happened to be watching -- and the in-process
+                # executor has no Airflow task log behind it at all.
+                _record_failure_quietly(
+                    application,
+                    source_uri=str(uri),
+                    stage=stage,
+                    error=error,
+                    orchestrator_run_id=orchestrator_run_id,
+                )
                 counts["errors"] += 1
                 continue
             if report.has_errors:
@@ -217,6 +236,170 @@ def process_stage_batch(
             else:
                 counts["processed"] += 1
     return counts
+
+
+@dataclass(frozen=True)
+class StageOutcome:
+    """What one stage of a direct run did, and what it did not have to do."""
+
+    stage: Stage
+    counts: StageBatchCounts
+    # Episodes the planner left out because the catalog already records this
+    # stage's steps as settled at their current versions. Reported rather than
+    # merely subtracted: a stage that quietly processed 3 of 400 episodes looks
+    # identical to a stage that was handed 3 episodes, and the difference is
+    # the whole reason to trust the number.
+    skipped_as_current: int = 0
+
+
+def run_stages_directly(
+    application: "App",
+    uris: Sequence[str],
+    stages: Iterable[Stage],
+    *,
+    selection: StageSelection = StageSelection.OUTSTANDING,
+    orchestrator_run_id: str | None = None,
+) -> list[StageOutcome]:
+    """Run the stage graph in this process, with the runtime's own semantics.
+
+    The no-scheduler backend: the same per-episode accounting and the same
+    mass-failure budgets the generated DAGs apply, minus the scheduler. Nobody
+    should reimplement the loop, which is why this lives beside
+    :func:`process_stage_batch` rather than in the CLI -- a hand-rolled
+    ``for uri in uris: app.process(uri)`` silently drops the budgets, and a
+    run that quarantined half its input would then report success.
+
+    Lane planning is deliberately absent. Bin-packing and staggered starts
+    exist to spread work over workers that run concurrently; here there is one
+    process, so every episode is one batch and a stagger would be pure delay.
+
+    Stages run in stage-graph order (sync, then meta, then labels, then
+    media), and each stage's gate applies before the next begins -- so a
+    corpus that fails the error budget in ``sync`` never spends an ffmpeg
+    decode pass on ``meta``. The budgets themselves are per-stage exactly as
+    in the sub-DAGs: the quarantine budget only in ``meta``, because checks
+    are what decide quarantine.
+
+    Under the default :attr:`StageSelection.OUTSTANDING`, every stage after
+    ``sync`` runs on only the episodes whose steps the catalog does not already
+    record as settled at their current versions -- so re-ingesting an unchanged
+    corpus costs one source hash per episode instead of a decode pass and a
+    contact sheet. The plan is built from what ``sync`` just recorded, which is
+    why it is computed here between the stages rather than by the caller before
+    them; :mod:`hflow.stage_planning` explains why the ordering is what makes
+    it sound. Planning is skipped entirely when ``sync`` is not among the
+    stages, because then nothing has re-established which episode each
+    recording currently is, and a stale answer would skip real work.
+
+    The per-stage budgets apply to what each stage actually ran. That is the
+    honest denominator: a stage handed four outstanding episodes out of four
+    hundred should fail loudly when all four error, and it does.
+    """
+    enabled_stages = set(stages)
+    ordered_stages = [stage for stage in Stage if stage in enabled_stages]
+    plan_against_catalog = selection is StageSelection.OUTSTANDING and Stage.SYNC in enabled_stages
+
+    outcomes: list[StageOutcome] = []
+    plans: dict[str, EpisodeStagePlan] | None = None
+    for stage in ordered_stages:
+        skipped_as_current = 0
+        if stage is Stage.SYNC or not plan_against_catalog:
+            stage_uris = list(uris)
+        else:
+            if plans is None:
+                plans = _plan_after_sync(
+                    application,
+                    uris,
+                    [later for later in ordered_stages if later is not Stage.SYNC],
+                )
+            stage_uris = []
+            for uri in uris:
+                match plans[str(uri)]:
+                    case OutstandingStages(stages=planned_stages):
+                        if stage in planned_stages:
+                            stage_uris.append(str(uri))
+                        else:
+                            skipped_as_current += 1
+                    case NoCanonicalEpisode():
+                        # Sync failed on this recording. It is already counted
+                        # and classified as that stage's failure, so it is
+                        # neither run here nor reported as up to date.
+                        pass
+        # A stage with nothing to do is skipped outright rather than handed an
+        # empty batch: the batch path opens a catalog reader for its quarantine
+        # gate, which on a bucket workspace means syncing the catalog mirror to
+        # answer a question about no episodes.
+        counts: StageBatchCounts = (
+            process_stage_batch(
+                application, stage_uris, stage.value, orchestrator_run_id=orchestrator_run_id
+            )
+            if stage_uris
+            else {"processed": 0, "quarantined": 0, "errors": 0}
+        )
+        outcomes.append(
+            StageOutcome(stage=stage, counts=counts, skipped_as_current=skipped_as_current)
+        )
+        if stage is Stage.META:
+            summarize_quarantine_budget([counts])
+        else:
+            summarize_error_budget([counts])
+    return outcomes
+
+
+def _plan_after_sync(
+    application: "App", uris: Sequence[str], later_stages: Sequence[Stage]
+) -> "dict[str, EpisodeStagePlan]":
+    """The post-sync plan, keyed by the caller's own uri spelling.
+
+    Two vocabularies meet here. The caller names episodes by data-root-relative
+    uri; the catalog files them under the App's ``source_uri``, which is what
+    ``App.process`` recorded. Resolving each uri through the same two functions
+    the processing path used -- ``resolve_episode_reference`` then
+    ``App.source_identity`` -- is what keeps the planner asking about the rows
+    that were actually written, and re-keying the answer back to the uri is
+    what keeps the caller from having to know any of that.
+    """
+    from hflow.stage_planning import plan_outstanding_stages
+
+    data_root = str(application.data_root)
+    identity_by_uri = {
+        str(uri): application.source_identity(resolve_episode_reference(data_root, str(uri)))
+        for uri in uris
+    }
+    plans = plan_outstanding_stages(
+        application, sorted(set(identity_by_uri.values())), later_stages
+    )
+    return {uri: plans[identity] for uri, identity in identity_by_uri.items()}
+
+
+def _record_failure_quietly(
+    application: "App",
+    *,
+    source_uri: str,
+    stage: Stage,
+    error: Exception,
+    orchestrator_run_id: str | None,
+) -> None:
+    """Write one ledger row, and never let that write fail the run.
+
+    The ledger exists to explain a failure, so it must not be able to cause
+    one: an episode that failed has already been counted, and losing the
+    explanation is strictly better than turning one bad recording into a dead
+    batch.
+    """
+    from hflow.ingest_ledger import record_ingest_failure
+
+    try:
+        record_ingest_failure(
+            application.workspace.catalog_root,
+            source_uri=source_uri,
+            stage=stage.value,
+            pipeline_version=application.pipeline_version,
+            error=error,
+            orchestrator_run_id=orchestrator_run_id,
+        )
+    except Exception:  # pragma: no cover - defensive
+        traceback.print_exc()
 
 
 @contextmanager
@@ -246,10 +429,15 @@ def _tally_batch_counts(batch_counts: Sequence[StageBatchCounts]) -> tuple[int, 
 def _raise_if_error_budget_exceeded(total: int, errors: int, budget: int) -> None:
     """The error gate both summaries share: over budget, or every episode errored."""
     if errors > budget or (errors and errors == total):
+        # Deliberately does NOT assert a cause. It used to say "infrastructure,
+        # not data", which the ingest ledger can now contradict directly: a
+        # corrupt recording fails here and is classified `source-unreadable`
+        # there. The ledger carries the classification per source; this
+        # sentence carries the count, and points at the table that knows.
         raise RuntimeError(
             f"{errors} of {total} episodes had processing errors "
-            f"(budget {budget}) -- infrastructure, not data; see the "
-            "process_batch task logs"
+            f"(budget {budget}); each is recorded in the ingest_failures table "
+            "with its classification"
         )
 
 

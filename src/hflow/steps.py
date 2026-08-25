@@ -103,8 +103,59 @@ class CheckStatus(StrEnum):
     PASSED = "passed"  # verdict True
     FAILED = "failed"  # verdict False (quarantines the episode when critical)
     MEASURED = "measured"  # ran and recorded evidence; no verdict offered
-    SKIPPED = "skipped"  # not run (episode quarantined upstream)
+    SKIPPED = "skipped"  # not run because the episode was quarantined upstream
+    SUPERSEDED = "superseded"  # an auto-registered default the pipeline measures itself
     ERROR = "error"  # crashed: infrastructure, not data
+
+
+# The statuses that mean "this check actually ran on this episode, and here is
+# its evidence". One owner, because coverage denominators ask it and two
+# private copies of "ran" is how two answers to one question drift apart.
+#
+# PASSED is deliberately not the whole set, and assuming it is yields an EMPTY
+# answer: an evidence-only check offers no verdict, so it records MEASURED, and
+# HFlow's entire built-in library is evidence-only by contract. FAILED counts
+# too -- a check that ran and returned a False verdict measured the episode;
+# whether to KEEP such an episode is a separate question its gate answers.
+#
+# ERROR is excluded, and that is a deliberate reading of
+# docs/ARCHITECTURE.md's "a check crashing is infrastructure, not data": a
+# crash means the evidence is missing, not that the episode is bad, so it
+# lowers coverage and is a retry rather than a verdict about the recording.
+RAN_STATUSES: tuple[CheckStatus, ...] = (
+    CheckStatus.PASSED,
+    CheckStatus.FAILED,
+    CheckStatus.MEASURED,
+)
+
+# The statuses that mean "this step has had its turn on this exact episode, and
+# running it again could not produce anything new". A different question from
+# RAN_STATUSES, asked by the two places where the answer decides whether there
+# is WORK LEFT TO DO rather than whether evidence exists: dataset membership
+# (:func:`hflow.dataset.default_dataset_sql`) and stage planning
+# (:mod:`hflow.stage_planning`).
+#
+# SUPERSEDED is the difference, and it is why this set has to exist separately.
+# An auto-registered default that the pipeline's own step supersedes produces
+# no evidence, so it is not a RAN status -- but it will stand down again on
+# every episode forever, so there is no work in it. Wrapping a built-in under a
+# name of your own is how docs/how-to/enable-built-in-checks.md says to
+# configure one, so reading it as unfinished work made `hflow dataset create`
+# select nothing at all on such a pipeline.
+#
+# SKIPPED is deliberately NOT here, and the distinction is load-bearing rather
+# than pedantic. A step skipped because a critical check quarantined the
+# episode is skipped CONDITIONALLY: retuning that check is the ordinary way to
+# un-quarantine an episode, and the moment it passes, every step that stood
+# aside has real work to do. Folding SKIPPED in here meant an un-quarantined
+# episode never got its labels or its contact sheets on any later pass, while
+# `hflow dataset create` -- whose quarantine rule now passed too -- shipped it
+# as complete. That is why the engine records the two causes as two statuses
+# (:class:`hflow.app.StepNotRun`) instead of one with a free-text reason.
+#
+# ERROR stays excluded for the same reason it is excluded above: a crash is
+# infrastructure, so it is a retry, and a retry is work left to do.
+SETTLED_STATUSES: tuple[CheckStatus, ...] = (*RAN_STATUSES, CheckStatus.SUPERSEDED)
 
 
 @dataclass(frozen=True)

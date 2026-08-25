@@ -19,7 +19,7 @@ def source_episode(tmp_path: Path) -> Path:
 
 
 def _app_with_check_and_enrichment(data_root: Path) -> hflow.App:
-    app = hflow.App("profiles", data_root=data_root)
+    app = hflow.App("profiles", data_root=data_root, default_checks=())
 
     @app.check()
     def joints(ep: hflow.Episode) -> hflow.CheckResult:
@@ -111,7 +111,7 @@ def test_quarantine_is_honored_across_invocations_via_the_catalog(
     source_episode: Path, tmp_path: Path
 ) -> None:
     data_root = tmp_path / "data"
-    app = hflow.App("profiles-quarantine", data_root=data_root)
+    app = hflow.App("profiles-quarantine", data_root=data_root, default_checks=())
     enrichment_ran = False
 
     @app.check(critical=True)
@@ -130,8 +130,9 @@ def test_quarantine_is_honored_across_invocations_via_the_catalog(
     relabel_report = app.process(source_episode, stages="relabel")
     assert not enrichment_ran
     assert relabel_report.enrichments[0].status == hflow.CheckStatus.SKIPPED
-    assert relabel_report.enrichments[0].skipped_reason is not None
-    assert "quarantined:dead_camera" in relabel_report.enrichments[0].skipped_reason
+    not_run = relabel_report.enrichments[0].not_run
+    assert isinstance(not_run, hflow.SkippedByQuarantine)
+    assert "quarantined:dead_camera" in not_run.reason
 
 
 def test_no_catalog_means_no_known_quarantine(source_episode: Path, tmp_path: Path) -> None:
@@ -146,7 +147,7 @@ def test_no_catalog_means_no_known_quarantine(source_episode: Path, tmp_path: Pa
 def test_media_stage_records_a_contact_sheet_artifact(tmp_path: Path) -> None:
     source_episode = synthesize_episode(tmp_path / "camera_episode.mcap", CAMERA_SPEC)
     data_root = tmp_path / "data"
-    app = hflow.App("profiles-media", data_root=data_root)
+    app = hflow.App("profiles-media", data_root=data_root, default_checks=())
 
     report = app.process(source_episode, stages={hflow.Stage.SYNC, hflow.Stage.MEDIA})
     media_runs = [run for run in report.enrichments if run.enrichment.name == "media/contact_sheet"]

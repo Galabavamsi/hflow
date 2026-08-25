@@ -3,12 +3,49 @@
 **Goal:** run HFlow's packaged checks over your episodes, and gate on the ones
 you want to reject episodes for, without writing the checks yourself.
 
-HFlow ships sixteen checks as plain functions in
+HFlow ships its checks as plain functions in
 [`hflow.checks`](../../src/hflow/checks.py). They are written in exactly the
 shape you would write your own, so reading one is the fastest way to learn the
 [porting pattern](../PORTING.md) -- and registering one is a single line.
 
-## Register them
+## Some of them already run
+
+A handful run on every episode without being registered, so a new pipeline
+records a baseline of evidence before anyone has opted into anything:
+
+```python
+app = hflow.App("my-pipeline")  # already measuring, before any @app.check
+```
+
+That set is `hflow.checks.DEFAULT_CHECKS`: `episode_duration`,
+`timestamp_regularity`, `camera_frame_stats`, `keyframe_interval`,
+`content_digest`, and `media_digest`. Each is zero-configuration, meaningful
+on any corpus (a recording with no cameras simply gets fewer keys), and cheap
+enough not to think about -- `camera_frame_stats` is one ffmpeg decode per
+camera and blackout, freeze, exposure and the frame count all come out of it.
+
+To change the set, pass it:
+
+```python
+app = hflow.App("my-pipeline", default_checks=())  # no automatic baseline
+
+app = hflow.App(  # everything except one you configure yourself, below
+    "my-pipeline",
+    default_checks=[c for c in hflow.checks.DEFAULT_CHECKS if c is not camera_frame_stats],
+)
+```
+
+Registering one of them yourself replaces the automatic copy rather than
+colliding with it, which is how a default gets a gate or `critical=True`. And
+if you wrap one under a name of your own, the automatic copy stands down: it
+is recorded as `superseded`, naming the step that superseded it, so the catalog
+never shows a check version claiming measurements it did not supply. That is a
+status of its own rather than `skipped`, because standing down this way is
+permanent while a quarantine skip lifts as soon as its critical check is
+retuned -- and `hflow dataset create` and re-ingest planning both have to tell
+those apart.
+
+## Register the rest
 
 A check is registered by calling `app.check()` with the function. No wrapper is
 needed when the defaults suit you:
@@ -18,25 +55,19 @@ import hflow
 from hflow.checks import (
     action_integrity,
     camera_frame_stats,
-    episode_duration,
     idle_fraction,
     joint_discontinuity,
-    keyframe_interval,
-    media_digest,
     required_topics,
     timestamp_regularity,
 )
 
-app = hflow.App("my-pipeline", data_root="./data")
+app = hflow.App("my-pipeline")
 
-app.check()(timestamp_regularity)
+# timestamp_regularity, camera_frame_stats, episode_duration, keyframe_interval
+# and media_digest already run; these are the ones that do not.
 app.check()(joint_discontinuity)
-app.check()(camera_frame_stats)
 app.check()(idle_fraction)
-app.check()(episode_duration)
 app.check()(action_integrity)
-app.check()(keyframe_interval)
-app.check()(media_digest)
 ```
 
 To pass configuration, bind it -- either with `functools.partial` or a wrapper,
@@ -63,8 +94,27 @@ def topic_inventory(ep: hflow.Episode) -> hflow.CheckResult:
     return required_topics(ep, topics=["/joint_states", "/imu"])
 ```
 
-Registering the same check twice is refused, because both copies would record
-the same measurement keys and the catalog would keep only one of them.
+Registering two steps of your own under one name is refused, because both
+copies would record the same measurement keys and the catalog would keep only
+one of them. A default is the exception: registering or wrapping one of those
+supersedes it, as above.
+
+One cost worth knowing before you wrap `camera_frame_stats` specifically.
+Supersession is decided from what a check actually measured, which is only
+knowable after it runs, so the automatic copy runs in full and its result is
+then discarded: **that is two ffmpeg decode passes per camera per episode**,
+forever. Every other built-in is cheap enough not to care. If you are wrapping
+that one, drop the automatic copy instead and the second pass goes away:
+
+```python
+app = hflow.App(
+    "my-pipeline",
+    default_checks=[c for c in hflow.checks.DEFAULT_CHECKS if c is not camera_frame_stats],
+)
+```
+
+`functools.partial` costs the same, and so does registering it bare under its
+own name -- that is a replacement, not a wrapper, so nothing runs twice.
 
 [`examples/stress/synthetic.py`](../../examples/stress/synthetic.py) registers
 several this way over a generated corpus, if you want a running reference.

@@ -22,9 +22,13 @@ v1 behavior:
   topic-keyed.) Per-message ``sequence`` numbers and per-channel metadata
   maps are not carried through the batch reader seam and are dropped; both
   are rare and advisory.
-- Topic-group chunking: camera-schema topics to the ``cameras`` group,
-  everything else to ``state``, with per-topic overrides in the config
-  (an override applies to every channel of that topic).
+- Topic-group chunking: camera-schema topics to the ``cameras`` group, bulk
+  non-camera channels (mean payload over ``BULK_MESSAGE_BYTES`` -- point
+  clouds, occupancy grids) to ``bulk``, everything else to ``state``, with
+  per-topic overrides in the config that beat all of it (an override applies
+  to every channel of that topic). The resolved topic-to-group map is written
+  into ``provenance/v1``, because the assignment is partly data-derived and
+  group names appear nowhere in the MCAP itself.
 - Derived signals (``derived=``): each :class:`~hflow.resample.DerivedSeries`
   becomes a NEW channel in the state group -- message encoding ``json``, one
   message per grid point, schema ``derived/v1`` (jsonschema). Each derived
@@ -54,10 +58,11 @@ from hflow import video as video_module
 from hflow.behavior import TRANSFORM_BEHAVIOR_VERSION
 from hflow.ffmpeg import ffmpeg_version
 from hflow.format import (
+    BULK_MESSAGE_BYTES,
     CAMERA_SCHEMA_NAMES,
     CANONICAL_VIDEO_SCHEMA_NAME,
+    DEFAULT_BULK_GROUP,
     DEFAULT_CAMERA_GROUP,
-    DEFAULT_CHUNK_SIZE_BYTES,
     DEFAULT_STATE_GROUP,
     DERIVED_SCHEMA_NAME,
     EPISODE_FORMAT_VERSION,
@@ -66,12 +71,17 @@ from hflow.format import (
     GOP_SECONDS,
     METADATA_RECORD_EPISODE,
     METADATA_RECORD_PROVENANCE,
+    MINIMUM_DERIVED_CHUNK_SIZE_BYTES,
+    PROVENANCE_KEY_CHUNK_TARGET_PREFIX,
     PROVENANCE_KEY_DERIVED_PREFIX,
     PROVENANCE_KEY_PIPELINE_VERSION,
     PROVENANCE_KEY_RESAMPLE_POLICY_VERSION,
     PROVENANCE_KEY_SCHEMA_VERSION,
+    PROVENANCE_KEY_TOPIC_GROUP_PREFIX,
+    READ_WINDOW_SECONDS,
     RESAMPLE_POLICY_VERSION,
     GopPreset,
+    derived_chunk_size_bytes,
 )
 from hflow.mcap_writer import CanonicalMcapWriter
 from hflow.reader import TopicInfo, open_reader
@@ -98,9 +108,19 @@ class TransformConfig:
     gop_preset: GopPreset = GopPreset.VLA
     gop_seconds: float | None = None  # overrides the preset's default when set
     crf: int = 23
-    chunk_size_bytes: int = DEFAULT_CHUNK_SIZE_BYTES
+    # ``None`` (the default) derives a target PER GROUP from the rate that
+    # group is written at and the preset's read window; an int pins one target
+    # for every group. Deriving is the default because it is measured: on the
+    # reference recording it fetches 3.79 chunks per sample against 9.18 at
+    # the flat 800 KB it replaced, for 1.7x the bytes. It is NOT the optimum
+    # there -- a flat 5.41 MB beat it -- but 5.41 MB is that recording's
+    # camera rate and would mis-fit the next corpus, which is the mistake the
+    # flat default already made. Pin an int when you can measure your own
+    # workload; docs/BENCHMARKS.md has the full table.
+    chunk_size_bytes: int | None = None
     compression: Literal["zstd", "none"] = "zstd"
-    # topic -> group name; topics not listed use the schema-based default.
+    # topic -> group name, beating the defaults; topics not listed go to
+    # ``cameras`` by schema, ``bulk`` by mean message size, else ``state``.
     topic_groups: dict[str, str] = field(default_factory=dict)
 
 
@@ -205,6 +225,104 @@ class _OutgoingMessage:
     # key ``output_channel_ids`` when messages are written.
     source_channel_id: int | str
     data: bytes
+
+
+def _bulk_topics(
+    outgoing: "Sequence[_OutgoingMessage]", infos: "Mapping[int, TopicInfo]"
+) -> frozenset[str]:
+    """Non-camera topics too large per message to share the state group.
+
+    Grouping is a read-pattern decision. A training sample co-reads the
+    cameras and the small state channels and never touches the point clouds,
+    so a lidar topic sharing chunks with ``/imu`` makes every ``/imu`` read
+    drag bulk bytes along -- measured at 230 MB versus 4 MB on real footage
+    in docs/BENCHMARKS.md. Mean payload size is the proxy that separates them
+    without needing to know what any particular topic means.
+
+    Costs nothing extra: the transform has already buffered every message by
+    the time this is asked, so this is arithmetic over data in hand rather
+    than another pass over the input.
+    """
+    payload_bytes: dict[str, int] = {}
+    message_counts: dict[str, int] = {}
+    for message in outgoing:
+        info = (
+            infos.get(message.source_channel_id)
+            if isinstance(message.source_channel_id, int)
+            else None
+        )
+        if info is None or info.schema_name in CAMERA_SCHEMA_NAMES:
+            # Cameras have their own group, and derived channels (a str id)
+            # are grids the state group is meant for.
+            continue
+        payload_bytes[info.topic] = payload_bytes.get(info.topic, 0) + len(message.data)
+        message_counts[info.topic] = message_counts.get(info.topic, 0) + 1
+    return frozenset(
+        topic
+        for topic, total_bytes in payload_bytes.items()
+        if total_bytes / message_counts[topic] > BULK_MESSAGE_BYTES
+    )
+
+
+def _group_for_topic(
+    info: TopicInfo, *, bulk_topics: "frozenset[str]", topic_group_overrides: Mapping[str, str]
+) -> str:
+    """Which chunk group one topic's channels are written into.
+
+    Topic-keyed on purpose: an override applies to every channel of a topic,
+    and several channels may legally share one.
+    """
+    override = topic_group_overrides.get(info.topic)
+    if override is not None:
+        return override
+    if info.schema_name in CAMERA_SCHEMA_NAMES:
+        return DEFAULT_CAMERA_GROUP
+    return DEFAULT_BULK_GROUP if info.topic in bulk_topics else DEFAULT_STATE_GROUP
+
+
+def _derived_group_chunk_sizes(
+    outgoing: "Sequence[_OutgoingMessage]",
+    *,
+    topic_group_by_message: Mapping[str, str],
+    infos: "Mapping[int, TopicInfo]",
+    read_window_seconds: float,
+) -> dict[str, int]:
+    """A chunk target per group, from the rate that group is written at.
+
+    Groups differ by orders of magnitude -- six cameras produce megabytes a
+    second where a proprio channel produces kilobytes -- so one threshold
+    cannot be right for both. Sizing each to what a read of this workload
+    actually spans is what makes a chunk a useful unit of fetching rather
+    than an arbitrary one.
+
+    Rate is measured over the episode's own span, which is what the file
+    records; a group with no span (one message, or all messages at one
+    instant) falls back to the floor rather than dividing by zero.
+    """
+    group_bytes: dict[str, int] = {}
+    group_first_time: dict[str, int] = {}
+    group_last_time: dict[str, int] = {}
+    for message in outgoing:
+        source_channel = message.source_channel_id
+        topic = source_channel if isinstance(source_channel, str) else infos[source_channel].topic
+        group_name = topic_group_by_message.get(topic)
+        if group_name is None:
+            continue
+        group_bytes[group_name] = group_bytes.get(group_name, 0) + len(message.data)
+        group_first_time.setdefault(group_name, message.log_time)
+        group_first_time[group_name] = min(group_first_time[group_name], message.log_time)
+        group_last_time[group_name] = max(
+            group_last_time.get(group_name, message.log_time), message.log_time
+        )
+    derived: dict[str, int] = {}
+    for group_name, total_bytes in group_bytes.items():
+        span_ns = group_last_time[group_name] - group_first_time[group_name]
+        if span_ns <= 0:
+            derived[group_name] = MINIMUM_DERIVED_CHUNK_SIZE_BYTES
+            continue
+        bytes_per_second = total_bytes / (span_ns / 1e9)
+        derived[group_name] = derived_chunk_size_bytes(bytes_per_second, read_window_seconds)
+    return derived
 
 
 def _resolve_decoder(topic: str, info: TopicInfo) -> Callable[[bytes], Any]:
@@ -343,14 +461,15 @@ def write_canonical_episode(
                     "channel topic; pick a topic not present in the source"
                 )
 
+        # The resolved layout, recorded into provenance below so it is a fact
+        # about the published episode rather than a rule to re-derive. Filled
+        # once, after the read, because the bulk rule needs message sizes; the
+        # per-group chunk targets read the same map, so the assignment cannot
+        # be computed one way for the writer and another for registration.
+        resolved_topic_groups: dict[str, str] = {}
+
         def group_for(info: TopicInfo) -> str:
-            # Group assignment stays topic-keyed: an override applies to
-            # every channel of that topic.
-            override = transform_config.topic_groups.get(info.topic)
-            if override is not None:
-                return override
-            is_camera = info.schema_name in CAMERA_SCHEMA_NAMES
-            return DEFAULT_CAMERA_GROUP if is_camera else DEFAULT_STATE_GROUP
+            return resolved_topic_groups[info.topic]
 
         transcode_channel_ids = sorted(
             channel_id
@@ -489,6 +608,25 @@ def write_canonical_episode(
 
         outgoing.sort(key=lambda message: (message.log_time, output_topic(message)))
 
+        # Every message is in hand now, so which non-camera topics are bulk is
+        # arithmetic rather than another pass over the input. Resolved before
+        # the writer block, which is where group_for is first called.
+        bulk_topics = _bulk_topics(outgoing, infos)
+        resolved_topic_groups.update(
+            {
+                info.topic: _group_for_topic(
+                    info,
+                    bulk_topics=bulk_topics,
+                    topic_group_overrides=transform_config.topic_groups,
+                )
+                for info in infos.values()
+            }
+        )
+        for derived_topic, _series, _version in derived_channels:
+            resolved_topic_groups[derived_topic] = transform_config.topic_groups.get(
+                derived_topic, DEFAULT_STATE_GROUP
+            )
+
         from mcap_protobuf.schema import build_file_descriptor_set
 
         source_metadata = reader.metadata()
@@ -505,9 +643,21 @@ def write_canonical_episode(
             robot_software_version=robot_software_version,
         )
 
+        resolved_chunk_sizes: dict[str, int] = {}
+        if transform_config.chunk_size_bytes is None:
+            resolved_chunk_sizes = _derived_group_chunk_sizes(
+                outgoing,
+                topic_group_by_message=resolved_topic_groups,
+                infos=infos,
+                read_window_seconds=READ_WINDOW_SECONDS[transform_config.gop_preset],
+            )
         with CanonicalMcapWriter(
             output_path,
-            chunk_size=transform_config.chunk_size_bytes,
+            chunk_size=(
+                resolved_chunk_sizes
+                if transform_config.chunk_size_bytes is None
+                else transform_config.chunk_size_bytes
+            ),
             compression=transform_config.compression,
         ) as writer:
             video_schema_id: int | None = None
@@ -594,6 +744,17 @@ def write_canonical_episode(
             }
             if source_uri is not None:
                 provenance["source_uri"] = source_uri
+            # The resolved layout, per topic. Group names live nowhere in the
+            # MCAP itself, and the assignment is now partly data-derived, so
+            # without this a published episode's layout could only be inferred
+            # from chunk membership.
+            for topic, group_name in sorted(resolved_topic_groups.items()):
+                provenance[f"{PROVENANCE_KEY_TOPIC_GROUP_PREFIX}{topic}"] = group_name
+            # Only when the policy actually chose them. A derived target is a
+            # fact about this episode's own byte rates, so unlike the
+            # configured value it cannot be read back off the config.
+            for group_name, chunk_target in sorted(resolved_chunk_sizes.items()):
+                provenance[f"{PROVENANCE_KEY_CHUNK_TARGET_PREFIX}{group_name}"] = str(chunk_target)
             if derived_channels:
                 # The alignment policy is part of every derived channel's
                 # identity: this is where format converters silently diverge.

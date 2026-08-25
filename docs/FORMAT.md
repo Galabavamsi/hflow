@@ -31,9 +31,11 @@ layout change at ~3.4× fewer chunk fetches and ~2.9× faster reads at their sca
 
 | Convention | Value |
 |---|---|
-| Default groups | `cameras` (topics whose schema is a camera schema; see below), `state` (everything else) |
-| Group override | Per-topic, at transform configuration time (`TransformConfig.topic_groups`) |
-| Target uncompressed chunk size | 800 000 bytes per group (configurable; measured defaults are a benchmark-report deliverable) |
+| Default groups | `cameras` (topics whose schema is a camera schema; see below), `bulk` (non-camera topics averaging over 16 384 bytes per message: point clouds, occupancy grids), `state` (everything else) |
+| Group override | Per-topic, at transform configuration time (`TransformConfig.topic_groups`); beats both defaults |
+| Resolved layout | Recorded per topic in `provenance/v1` as `group/<topic>` |
+| Target uncompressed chunk size | Derived **per group** as `rate x read window`, clamped to [800 KB, 8 MB]. Measured: 3.79 chunk fetches per training sample fetching 11.21 MB, against 9.18 fetching 6.65 MB at the flat 800 KB it replaced -- half the round trips for 1.7x the bytes, and not the optimum on that recording (docs/BENCHMARKS.md has the full table and says why the default stands anyway). `TransformConfig.chunk_size_bytes=<int>` pins one target for every group instead |
+| Derived chunk targets | Recorded per group in `provenance/v1` as `chunk-target/<group>`, and only when derived (a pinned target is already in the config) |
 | Camera schemas | `foxglove.CompressedVideo`, `foxglove.CompressedImage`, `foxglove.RawImage`, `foxglove_msgs/msg/CompressedVideo`, `sensor_msgs/msg/CompressedImage`, `sensor_msgs/msg/Image` |
 
 Writer mechanics (how HFlow's `CanonicalMcapWriter` does it; equivalent layouts are conforming as long as the rule above holds):

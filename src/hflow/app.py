@@ -26,8 +26,9 @@ import time
 import traceback
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, ModuleType
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -42,11 +43,17 @@ from hflow.catalog import (
 )
 from hflow.episode import Episode, _sanitize_topic
 from hflow.ffmpeg import contact_sheet
+from hflow.format import (
+    EPISODE_FORMAT_VERSION,
+    FFMPEG_VERSION_NOT_USED,
+    METADATA_RECORD_PROVENANCE,
+)
 from hflow.manifest import (
     DerivedChannelManifest,
     PipelineManifest,
     StepManifest,
 )
+from hflow.reader import open_reader
 from hflow.resample import DerivedSeries
 from hflow.steps import (
     GATE_UNEVALUATED_TAG_PREFIX,
@@ -89,12 +96,29 @@ from hflow.workspace import RUNTIME_BUNDLE_DIRECTORY_NAME, Workspace
 # -> the stamps it wrote. See :meth:`App.transform`.
 TransformFunction = Callable[[Path, Path, TransformConfig], EpisodeStamps]
 
+
+class SourceNotFound(FileNotFoundError):
+    """The recording an ingest names is not where it was named.
+
+    A ``FileNotFoundError`` subclass so every existing handler keeps catching
+    it; the distinct type exists so the ingest ledger can tell "the file is
+    not there" (a fact about the request) from "this machine could not read
+    it" (a fact about the machine) without matching on message text.
+    """
+
+
 # The environment override for an App constructed without an explicit data
 # root: the runtime (or a control plane provisioning a hosted workspace)
 # exports it, and the same pipeline file runs unedited at every vantage --
 # dev laptop, container mount, or per-workspace bucket prefix.
 DATA_ROOT_ENVIRONMENT_VARIABLE = "HFLOW_DATA_ROOT"
 DEFAULT_DATA_ROOT = "./data"
+
+# The module-level name a pipeline file is expected to bind its App to, when
+# an address does not spell one out as ``pipeline.py:other_name``. One owner,
+# because the CLI, the bundle renderer, and the generated DAG tasks all have
+# to agree on it.
+DEFAULT_APP_VARIABLE = "app"
 
 # Environment overrides for endpoint aliases (see App(endpoints=...)):
 # HFLOW_ENDPOINT_<ALIAS>, the alias uppercased with every non-alphanumeric
@@ -109,18 +133,50 @@ def endpoint_environment_variable_name(alias: str) -> str:
     return f"{ENDPOINT_ENVIRONMENT_VARIABLE_PREFIX}{sanitized_alias}"
 
 
+def default_data_root() -> "Path | str | StorageRoot":
+    """The workspace hflow acts on when no argument and no flag names one.
+
+    The one owner of that answer, because more than one entry point asks it and
+    they must not disagree. The CLI resolves it for ``--catalog`` and
+    ``--output`` defaults; :class:`App` resolves it for a pipeline written as
+    ``hflow.App("name")``, which is the shape the docs and examples now teach.
+    Two implementations of this order is how ``hflow ingest`` ends up writing
+    one workspace while ``hflow curate`` reads another.
+
+    1. ``HFLOW_DATA_ROOT`` -- how a runtime or a control plane injects the
+       workspace's root, and above the file on purpose: the file is committed
+       beside the pipeline, and a shell pointed at another workspace must not
+       need the repository edited.
+    2. the nearest ancestor ``hflow.toml`` (:mod:`hflow.project`)
+    3. ``./data``, the historical local default
+
+    An explicit ``data_root=`` argument or ``--data-root`` flag outranks all
+    three and never reaches here.
+    """
+    environment_data_root = os.environ.get(DATA_ROOT_ENVIRONMENT_VARIABLE)
+    if environment_data_root:
+        return environment_data_root
+    # Imported here rather than at module scope: hflow.project is a small leaf
+    # module, but App construction is on the import path of every pipeline and
+    # the ancestor walk only matters when nothing else answered.
+    from hflow.project import ProjectConfig, find_project_config
+
+    match find_project_config():
+        case ProjectConfig(storage_root=configured_root) if configured_root is not None:
+            return configured_root
+        case _:
+            return DEFAULT_DATA_ROOT
+
+
 def _resolve_data_root(data_root: "Path | str | StorageRoot | None") -> "Path | str | StorageRoot":
     """Resolve the App's data root at the construction boundary.
 
-    An explicit argument always wins; ``None`` means "let the environment
-    decide": :data:`DATA_ROOT_ENVIRONMENT_VARIABLE` if set (how a runtime or
-    control plane injects the workspace's root), else ``./data`` (the
-    historical local default).
+    An explicit argument always wins; ``None`` means "resolve it the way every
+    other hflow entry point does" (:func:`default_data_root`).
     """
     if data_root is not None:
         return data_root
-    environment_data_root = os.environ.get(DATA_ROOT_ENVIRONMENT_VARIABLE)
-    return environment_data_root if environment_data_root else DEFAULT_DATA_ROOT
+    return default_data_root()
 
 
 # The ingest stage graph's "Media" sub-DAG collapsed to its v1 built-in: one
@@ -136,11 +192,32 @@ _SYNC_COMPLETION_MARKER_NAME = ".sync-complete.json"
 
 @dataclass(frozen=True)
 class _SyncCompletion:
-    """Proof that sync completed for one source path and canonical version."""
+    """Proof that sync completed for one source path and canonical version.
+
+    The last three fields are the *reuse witness*: enough to decide that
+    re-running sync would rewrite byte-identical output, so it can be skipped.
+    They are optional because markers written before they existed are still
+    valid proof for the non-sync stages, which is all those stages ever asked
+    of them. A witness-less marker simply never satisfies the reuse gate: one
+    re-transcode rewrites it in the current shape, and that is the whole
+    migration.
+    """
 
     source_path: str
     schema_version: str
     pipeline_version: str
+    # Which source BYTES produced the canonical. Content, never size+mtime:
+    # this repo identifies by content everywhere, and a same-length rewrite
+    # or a preserved mtime would defeat the weaker test silently.
+    source_digest: str | None = None
+    # The transform is stamped with an ffmpeg version that does NOT reach
+    # pipeline_version, and different builds genuinely encode differently.
+    ffmpeg_version: str | None = None
+    # "default" or "override". An @app.transform override is contractually
+    # required to end in write_canonical_episode, so it stamps the SAME
+    # pipeline_version the default transform would: without this, REMOVING an
+    # override would reuse a canonical the current pipeline cannot produce.
+    transform_kind: str | None = None
 
 
 def _source_identity(source_reference: Path | str, storage_root: StorageRoot) -> str:
@@ -196,6 +273,10 @@ def _write_sync_completion_marker(marker_path: Path, completion: _SyncCompletion
         "schema_version": completion.schema_version,
         "pipeline_version": completion.pipeline_version,
     }
+    for witness_field in ("source_digest", "ffmpeg_version", "transform_kind"):
+        witness_value = getattr(completion, witness_field)
+        if witness_value is not None:
+            marker_payload[witness_field] = witness_value
     with tempfile.NamedTemporaryFile(
         mode="w",
         encoding="utf-8",
@@ -235,7 +316,31 @@ def _read_sync_completion_marker(marker_path: Path) -> _SyncCompletion:
                 f"{field_name!r} must be a non-empty string"
             )
         required_values[field_name] = field_value
-    return _SyncCompletion(**required_values)
+    # Parsed leniently, on purpose: a missing or malformed witness field means
+    # "cannot prove reuse is safe", which the gate already treats as a miss.
+    # Requiring them would make every pre-witness marker unreadable and break
+    # the non-sync stages, which never needed a witness at all.
+    optional_values = {
+        field_name: value
+        for field_name in ("source_digest", "ffmpeg_version", "transform_kind")
+        if isinstance(value := marker_payload.get(field_name), str) and value
+    }
+    return _SyncCompletion(**required_values, **optional_values)
+
+
+def _file_digest(path: Path) -> str:
+    """A content witness for one file, streamed rather than read whole.
+
+    The same instrument ``content_episode_id`` uses on the canonical, kept at
+    full length here because this one gates correctness rather than naming a
+    row. Roughly 2% of the work it guards: a 512 MB source hashes in under
+    half a second against the ~20 s that same recording takes to transform.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while block := stream.read(8 * 1024 * 1024):
+            digest.update(block)
+    return f"sha256:{digest.hexdigest()}"
 
 
 def _render_contact_sheets(canonical_episode: Episode, media_directory: Path) -> EnrichmentResult:
@@ -254,6 +359,25 @@ def _render_contact_sheets(canonical_episode: Episode, media_directory: Path) ->
     return EnrichmentResult(artifacts=sheet_artifacts)
 
 
+@cache
+def media_contact_sheet_step_version() -> str:
+    """The content-hash version of the engine's contact-sheet step.
+
+    One owner, because two things now need it: :meth:`App.process` stamps the
+    step's catalog rows with it, and :mod:`hflow.stage_planning` asks whether a
+    row at this version already exists before spending a decode pass. A planner
+    that recomputed it its own way would schedule the media stage forever the
+    first time the two spellings drifted.
+
+    Cached because the inputs are module constants -- the step's name and the
+    renderer's own source -- so the answer cannot change within a process, and
+    hashing a function's transitive source is not free.
+    """
+    return compute_check_version(
+        MEDIA_CONTACT_SHEET_STEP_NAME, _render_contact_sheets, False, frozenset(), None
+    )
+
+
 def _resolve_stages(stages: Iterable[Stage] | str | None) -> frozenset[Stage]:
     """Parse the ``stages=`` boundary: profile name, explicit set, or default."""
     if stages is None:
@@ -263,6 +387,52 @@ def _resolve_stages(stages: Iterable[Stage] | str | None) -> frozenset[Stage]:
     return frozenset(Stage(stage) for stage in stages)
 
 
+@dataclass(frozen=True)
+class SupersededByPipeline:
+    """An auto-registered default that stood down: the pipeline measures this.
+
+    Permanent, and that is the whole difference from
+    :class:`SkippedByQuarantine`. The pipeline's own step emits these keys on
+    every episode, so this default will stand down on every episode forever,
+    and anything asking "is there work left here?" must read it as no.
+    """
+
+    superseded_keys: tuple[str, ...]
+
+    @property
+    def reason(self) -> str:
+        shown = ", ".join(repr(key) for key in self.superseded_keys[:3])
+        return (
+            f"superseded by this pipeline's own steps, which measure {shown}"
+            f"{' and more' if len(self.superseded_keys) > 3 else ''}; pass "
+            "hflow.App(default_checks=...) to change the automatic set"
+        )
+
+
+@dataclass(frozen=True)
+class SkippedByQuarantine:
+    """Not run because a critical check had already quarantined the episode.
+
+    CONDITIONAL, unlike :class:`SupersededByPipeline`: retuning the critical
+    check is the ordinary way to un-quarantine an episode, and the moment that
+    happens this step has real work to do again. Anything asking "is there work
+    left here?" must read it as yes, or an un-quarantined episode never gets
+    its labels and its contact sheets and no later pass ever notices.
+    """
+
+    quarantine_tags: tuple[str, ...]
+
+    @property
+    def reason(self) -> str:
+        return f"episode quarantined ({', '.join(self.quarantine_tags)})"
+
+
+# Why a registered step produced no result without failing. Two variants
+# because the two answers differ on the one question that matters downstream:
+# whether running it again could produce anything new.
+StepNotRun = SupersededByPipeline | SkippedByQuarantine
+
+
 @dataclass
 class CheckRunReport:
     """Outcome of one check invocation inside a test run."""
@@ -270,13 +440,18 @@ class CheckRunReport:
     check: RegisteredCheck
     result: CheckResult | None = None
     error: str | None = None
-    skipped_reason: str | None = None
+    not_run: StepNotRun | None = None
     duration_s: float = 0.0
 
     @property
     def status(self) -> CheckStatus:
-        if self.skipped_reason is not None:
-            return CheckStatus.SKIPPED
+        match self.not_run:
+            case SupersededByPipeline():
+                return CheckStatus.SUPERSEDED
+            case SkippedByQuarantine():
+                return CheckStatus.SKIPPED
+            case None:
+                pass
         if self.error is not None:
             return CheckStatus.ERROR
         if self.result is not None and self.result.verdict is False:
@@ -293,15 +468,22 @@ class EnrichmentRunReport:
     enrichment: RegisteredEnrichment
     result: EnrichmentResult | None = None
     error: str | None = None
-    skipped_reason: str | None = None
+    not_run: StepNotRun | None = None
     duration_s: float = 0.0
     artifact_uris: dict[str, str] = field(default_factory=dict)
 
     @property
     def status(self) -> CheckStatus:
-        # Enrichments have no verdicts, so only three statuses apply.
-        if self.skipped_reason is not None:
-            return CheckStatus.SKIPPED
+        # Enrichments have no verdicts, so the verdict statuses never apply;
+        # supersession does not either, since only auto-registered CHECKS have
+        # an automatic copy to stand down.
+        match self.not_run:
+            case SkippedByQuarantine():
+                return CheckStatus.SKIPPED
+            case SupersededByPipeline():
+                return CheckStatus.SUPERSEDED
+            case None:
+                pass
         if self.error is not None:
             return CheckStatus.ERROR
         return CheckStatus.MEASURED
@@ -420,13 +602,13 @@ def _raise_if_step_cannot_take_only_an_episode(
 def _execute_enrichment(
     registered_enrichment: RegisteredEnrichment,
     canonical_episode: Episode,
-    skipped_reason: str | None,
+    not_run: StepNotRun | None,
 ) -> EnrichmentRunReport:
     """Run one enrichment-shaped step (user enrichment or the built-in media
     step) with the shared timing/boundary/error mechanics."""
     enrichment_run = EnrichmentRunReport(enrichment=registered_enrichment)
-    if skipped_reason is not None:
-        enrichment_run.skipped_reason = skipped_reason
+    if not_run is not None:
+        enrichment_run.not_run = not_run
         return enrichment_run
     started = time.perf_counter()
     try:
@@ -618,7 +800,7 @@ def _status_mark(status: CheckStatus) -> str:
             return "x"
         case CheckStatus.MEASURED:
             return "*"
-        case CheckStatus.SKIPPED:
+        case CheckStatus.SKIPPED | CheckStatus.SUPERSEDED:
             return "-"
         case CheckStatus.ERROR:
             return "!"
@@ -636,6 +818,10 @@ class TestReport:
     enrichments: list[EnrichmentRunReport] = field(default_factory=list)
     quarantine_tags: list[str] = field(default_factory=list)
     catalog_entry: AppendResult | None = None
+    # Whether sync kept the canonical episode it already had. Reported because
+    # a reused run and a transcoded run are otherwise indistinguishable
+    # without comparing file timestamps.
+    sync_reused: bool = False
 
     @property
     def quarantined(self) -> bool:
@@ -669,6 +855,8 @@ class TestReport:
             f"pipeline_version={self.stamps.pipeline_version} "
             f"ffmpeg={self.stamps.ffmpeg_version}",
         ]
+        if self.sync_reused:
+            lines.append("sync: reused the existing canonical episode (source unchanged)")
         if self.catalog_entry is not None:
             record_verb = "recorded" if self.catalog_entry.written else "already recorded"
             lines.append(
@@ -681,8 +869,8 @@ class TestReport:
         for run in self.checks:
             mark = _status_mark(run.status)
             headline = f"  {mark} {run.check.name} [{run.status}] ({run.duration_s * 1000:.0f}ms)"
-            if run.skipped_reason is not None:
-                lines.append(f"  {mark} {run.check.name} [skipped] {run.skipped_reason}")
+            if run.not_run is not None:
+                lines.append(f"  {mark} {run.check.name} [{run.status}] {run.not_run.reason}")
                 continue
             if run.error is not None:
                 lines.append(f"{headline} {run.error}")
@@ -702,8 +890,10 @@ class TestReport:
             for enrichment_run in self.enrichments:
                 mark = _status_mark(enrichment_run.status)
                 name = enrichment_run.enrichment.name
-                if enrichment_run.skipped_reason is not None:
-                    lines.append(f"  {mark} {name} [skipped] {enrichment_run.skipped_reason}")
+                if enrichment_run.not_run is not None:
+                    lines.append(
+                        f"  {mark} {name} [{enrichment_run.status}] {enrichment_run.not_run.reason}"
+                    )
                     continue
                 headline = (
                     f"  {mark} {name} [{enrichment_run.status}] "
@@ -763,6 +953,7 @@ class App:
         *,
         transform: TransformConfig | None = None,
         endpoints: dict[str, str] | None = None,
+        default_checks: Iterable[CheckFunction] | None = None,
     ) -> None:
         self.name = name
         self.storage_root = parse_storage_root(_resolve_data_root(data_root))
@@ -786,6 +977,165 @@ class App:
         self.enrichments: list[RegisteredEnrichment] = []
         self.derived: list[DerivedChannel] = []
         self.transform_override: TransformFunction | None = None
+        # Which registrations came from ``default_checks`` rather than from
+        # the pipeline: registering one of these yourself replaces it (that
+        # is how a default gets a gate or a bound parameter), while two USER
+        # steps sharing a name stays a refusal.
+        self._default_check_names: set[str] = set()
+        self._register_default_checks(default_checks)
+
+    def _yield_defaults_superseded_by_the_pipeline(self, report: "TestReport") -> None:
+        """A pipeline's own step outranks a default measuring the same thing.
+
+        The documented way to configure a built-in is to wrap it under a name
+        of your own (``camera_health`` calling ``camera_frame_stats``), which
+        emits the built-in's keys under a different check name. Against an
+        automatic baseline that is a duplicate-key collision, and refusing the
+        run over it would mean every pipeline that binds a parameter to a
+        built-in had to also opt out of the default -- an opinion that fights
+        the user is not worth holding.
+
+        So the default yields: it contributed nothing this pipeline did not
+        already measure, and it is recorded as ``superseded`` with the reason
+        rather than silently dropped, so the catalog never shows a check
+        version that claims measurements it did not supply.
+
+        A status of its own, not ``skipped``, because the two are opposite
+        answers to the question a planner asks. This supersession is permanent
+        -- the pipeline's step emits those keys on every episode -- while a
+        quarantine skip lifts the moment its critical check is retuned. See
+        :data:`hflow.steps.SETTLED_STATUSES`.
+
+        Only a DEFAULT ever yields. Two of the pipeline's own steps sharing a
+        key is still refused, because there the engine has no basis to pick a
+        winner and one row would vanish from ``measurements_latest``.
+        """
+        if not self._default_check_names:
+            return
+        pipeline_measurement_keys: set[str] = set()
+        for run in report.checks:
+            if run.check.name not in self._default_check_names and run.result is not None:
+                pipeline_measurement_keys.update(run.result.measurements)
+        for enrichment_run in report.enrichments:
+            if enrichment_run.result is not None:
+                pipeline_measurement_keys.update(enrichment_run.result.labels)
+        if not pipeline_measurement_keys:
+            return
+        for run in report.checks:
+            if run.check.name not in self._default_check_names or run.result is None:
+                continue
+            superseded_keys = sorted(set(run.result.measurements) & pipeline_measurement_keys)
+            if not superseded_keys:
+                continue
+            run.not_run = SupersededByPipeline(superseded_keys=tuple(superseded_keys))
+            run.result = None
+
+    def _reusable_canonical_episode(
+        self,
+        run_storage_root: StorageRoot,
+        canonical_file_name: str,
+        source_identifier: str,
+        source_digest: str,
+    ) -> "tuple[_SyncCompletion, Path] | None":
+        """The existing canonical episode, when re-running sync would rewrite
+        it byte for byte. ``None`` on any doubt whatsoever.
+
+        Transcoding is by far the most expensive thing HFlow does, and a
+        re-ingest of an unchanged recording did all of it again for output it
+        already had. Skipping is safe exactly when the inputs to the transform
+        are provably the same: the same source bytes, the same configuration,
+        and the same instrument.
+
+        Everything is read through the storage root rather than off the run
+        directory. On a bucket workspace that directory is a local mirror, so
+        a file being there proves nothing about the store: it can survive a
+        failed publish, a lifecycle deletion, or a stale worker. Fetching is
+        what checks. This is the same reasoning behind clearing the marker
+        before a rewrite, which is why reuse never reaches that path.
+
+        Returns ``None`` rather than raising, always. A canonical whose
+        provenance disagrees with its marker is a hard error for a relabel
+        run, which reads what sync left behind; for a sync run the answer is
+        simply to transcode it again.
+        """
+        if self.transform_override is not None:
+            # An override's own code is in no version hash, so nothing here
+            # could tell an edited override from an unchanged one.
+            return None
+        try:
+            marker_path = run_storage_root.fetch(_SYNC_COMPLETION_MARKER_NAME)
+            completion = _read_sync_completion_marker(marker_path)
+        except (FileNotFoundError, ValueError, OSError):
+            return None
+        if completion.transform_kind != "default":
+            return None
+        if completion.source_path != source_identifier:
+            # Two sources can share a run directory when output_dir= names one.
+            return None
+        if completion.source_digest != source_digest:
+            return None
+        if completion.schema_version != EPISODE_FORMAT_VERSION:
+            return None
+        if completion.pipeline_version != self.pipeline_version:
+            return None
+        try:
+            canonical_path = run_storage_root.fetch(canonical_file_name)
+        except (FileNotFoundError, OSError):
+            return None
+        canonical_reader = None
+        try:
+            canonical_reader = open_reader(canonical_path)
+            # The provenance record alone: stamps_from_provenance wants the
+            # flat mapping, and reading only this record avoids opening a full
+            # Episode (and its scratch workdir) just to read four strings.
+            canonical_stamps = stamps_from_provenance(
+                dict(canonical_reader.metadata().get(METADATA_RECORD_PROVENANCE, {}))
+            )
+        except Exception:
+            return None
+        finally:
+            if canonical_reader is not None:
+                canonical_reader.close()
+        if (
+            canonical_stamps.schema_version != completion.schema_version
+            or canonical_stamps.pipeline_version != completion.pipeline_version
+        ):
+            return None
+        if canonical_stamps.ffmpeg_version != completion.ffmpeg_version:
+            return None
+        if canonical_stamps.ffmpeg_version != FFMPEG_VERSION_NOT_USED:
+            # Only now, when the recording demonstrably has video, is it worth
+            # resolving ffmpeg: doing it unconditionally would force the
+            # pinned-build download on camera-less episodes that never need it.
+            from hflow.ffmpeg import ffmpeg_version
+
+            try:
+                if canonical_stamps.ffmpeg_version != ffmpeg_version():
+                    return None
+            except Exception:
+                return None
+        return completion, canonical_path
+
+    def _register_default_checks(self, default_checks: "Iterable[CheckFunction] | None") -> None:
+        """Register the baseline every episode gets without anyone opting in.
+
+        ``None`` means :data:`hflow.checks.DEFAULT_CHECKS`; any iterable
+        replaces the set outright, and an empty one turns the baseline off.
+        A collection rather than a boolean because the real need is "all of
+        them except the one I configured with a wrapper", which an on/off
+        switch cannot say -- it would force opting out of every default to
+        change one.
+        """
+        from hflow.checks import DEFAULT_CHECKS
+
+        for check_function in DEFAULT_CHECKS if default_checks is None else default_checks:
+            self.check()(check_function)
+            self._default_check_names.add(getattr(check_function, "__name__", ""))
+
+    def _remove_registered_check(self, check_name: str) -> None:
+        """Drop one registration by name, so a user's can take its place."""
+        self.checks = [registered for registered in self.checks if registered.name != check_name]
+        self._default_check_names.discard(check_name)
 
     def _registered_step_names(self) -> set[str]:
         # Checks, enrichments, and the built-in media step share the catalog's
@@ -810,6 +1160,23 @@ class App:
             self.transform_config,
             {channel.topic: channel.version for channel in self.derived},
         )
+
+    def source_identity(self, episode: "Path | str") -> str:
+        """The ``source_uri`` this App would record for one episode reference.
+
+        The catalog's key for a source RECORDING, as opposed to a canonical
+        episode's content-addressed ``episode_id``. References under the data
+        root reduce to their root-relative key, so the same recording named
+        from a host path, a container mount, or a full bucket URL yields one
+        identity and therefore one run directory, one sync-completion lineage,
+        and one row in ``episodes_latest``.
+
+        Public because asking "what will this be called in the catalog?"
+        without processing anything is exactly what a planner does
+        (:mod:`hflow.stage_planning`), and computing it a second way is how a
+        planner ends up querying for rows that were filed under another name.
+        """
+        return _source_identity(episode, self.storage_root)
 
     def manifest(self) -> PipelineManifest:
         """This pipeline's JSON-able description: step names, content-hash
@@ -874,6 +1241,12 @@ class App:
             check_name = name if name is not None else getattr(function, "__name__", "")
             if not check_name:
                 raise ValueError("pass name=... when registering a callable without __name__")
+            if check_name in self._default_check_names:
+                # Registering a default yourself is how you configure it --
+                # add a gate, mark it critical, bind a parameter -- so it
+                # replaces the automatic copy instead of colliding with it.
+                # Two USER steps sharing a name still refuse below.
+                self._remove_registered_check(check_name)
             if check_name in self._registered_step_names():
                 raise ValueError(f"a step named {check_name!r} is already registered")
             _raise_if_step_cannot_take_only_an_episode(
@@ -1046,7 +1419,7 @@ class App:
                     candidate = root_path / episode_path
                     if candidate.is_file():
                         return candidate
-        raise FileNotFoundError(
+        raise SourceNotFound(
             f"episode {str(episode)!r} not found: not an existing local file, and not "
             f"a key under the data root {self.storage_root}"
         )
@@ -1267,6 +1640,14 @@ class App:
         whole batch so a stage does not re-sync and re-open the catalog once
         per episode; omit it and this call opens one for itself.
 
+        ``sync`` reuses the canonical episode it already produced when the
+        source bytes, the pipeline version, the format version and the ffmpeg
+        build all match what the last completed sync recorded -- transcoding
+        the same recording twice cannot produce different output, and it is
+        the most expensive thing here. Any doubt transcodes again. Deleting
+        the run directory's ``.sync-complete.json`` forces that, and is the
+        supported way to ask for it.
+
         ``orchestrator_run_id`` records which orchestrated run produced the
         row, so "which run wrote this" is answerable from the catalog alone.
         Named for the role rather than for a scheduler: the generated Airflow
@@ -1305,10 +1686,24 @@ class App:
 
         stamps: EpisodeStamps | None = None
         sync_completion: _SyncCompletion | None = None
+        source_digest: str | None = None
+        reused_canonical = False
         if Stage.SYNC in enabled_stages:
+            # Hashed once, serving both the reuse decision and the marker the
+            # transcode path writes.
+            source_digest = _file_digest(source_path)
+            reusable = self._reusable_canonical_episode(
+                run_storage_root, canonical_file_name, source_identifier, source_digest
+            )
+            if reusable is not None:
+                sync_completion, canonical_path = reusable
+                reused_canonical = True
+        if Stage.SYNC in enabled_stages and not reused_canonical:
             # File existence is not proof of a successful rewrite. Clear the
             # durable proof before starting so a tolerated sync failure cannot
             # let a later sub-DAG consume a previous canonical episode.
+            # Reuse is the one path that never gets here: it proved the marker
+            # good rather than assuming a file on disk was.
             run_storage_root.delete(_SYNC_COMPLETION_MARKER_NAME)
             if self.transform_override is not None:
                 # Derived signals are the override's own responsibility (see
@@ -1395,7 +1790,12 @@ class App:
                     "provenance record"
                 )
 
-            if Stage.SYNC in enabled_stages:
+            # Keyed on whether sync actually TRANSCODED, not on whether it was
+            # enabled. Publishing is an unconditional overwrite on a bucket
+            # root, so republishing an untouched canonical would re-upload the
+            # whole file (hundreds of megabytes) to store the bytes already
+            # there -- and rewrite a marker that is still true.
+            if Stage.SYNC in enabled_stages and not reused_canonical:
                 canonical_uri = run_storage_root.publish(canonical_path, canonical_file_name)
                 _write_sync_completion_marker(
                     sync_completion_marker_path,
@@ -1403,6 +1803,11 @@ class App:
                         source_path=source_identifier,
                         schema_version=stamps.schema_version,
                         pipeline_version=stamps.pipeline_version,
+                        source_digest=source_digest,
+                        ffmpeg_version=stamps.ffmpeg_version,
+                        transform_kind=(
+                            "override" if self.transform_override is not None else "default"
+                        ),
                     ),
                 )
                 run_storage_root.publish(sync_completion_marker_path, _SYNC_COMPLETION_MARKER_NAME)
@@ -1414,6 +1819,7 @@ class App:
                 canonical_path=canonical_path,
                 stamps=stamps,
                 stages_run=enabled_stages,
+                sync_reused=reused_canonical,
             )
 
             checks_to_run = self._ordered_checks() if Stage.META in enabled_stages else []
@@ -1421,9 +1827,7 @@ class App:
                 run = CheckRunReport(check=registered)
                 report.checks.append(run)
                 if report.quarantined:
-                    run.skipped_reason = (
-                        f"episode quarantined ({', '.join(report.quarantine_tags)})"
-                    )
+                    run.not_run = SkippedByQuarantine(tuple(report.quarantine_tags))
                     continue
                 started = time.perf_counter()
                 try:
@@ -1463,17 +1867,15 @@ class App:
                         carried_tags = history.quarantine_tags(episode_id)
                 if carried_tags is not None:
                     report.quarantine_tags.extend(carried_tags)
-            quarantine_skip_reason = (
-                f"episode quarantined ({', '.join(report.quarantine_tags)})"
-                if report.quarantined
-                else None
+            quarantine_skip = (
+                SkippedByQuarantine(tuple(report.quarantine_tags)) if report.quarantined else None
             )
 
             if Stage.LABELS in enabled_stages:
                 for registered_enrichment in self._ordered_enrichments():
                     report.enrichments.append(
                         _execute_enrichment(
-                            registered_enrichment, canonical_episode, quarantine_skip_reason
+                            registered_enrichment, canonical_episode, quarantine_skip
                         )
                     )
 
@@ -1492,16 +1894,10 @@ class App:
                     uses=None,
                     # Versioned by the implementation function, so a changed
                     # renderer is a new measurement identity.
-                    version=compute_check_version(
-                        MEDIA_CONTACT_SHEET_STEP_NAME,
-                        _render_contact_sheets,
-                        False,
-                        frozenset(),
-                        None,
-                    ),
+                    version=media_contact_sheet_step_version(),
                 )
                 report.enrichments.append(
-                    _execute_enrichment(media_step, canonical_episode, quarantine_skip_reason)
+                    _execute_enrichment(media_step, canonical_episode, quarantine_skip)
                 )
 
             episode_metadata = dict(canonical_episode.metadata)
@@ -1546,6 +1942,7 @@ class App:
 
         # Assembled even when not recording, so the dev loop refuses a key
         # collision on episode one instead of at the first curation query.
+        self._yield_defaults_superseded_by_the_pipeline(report)
         check_rows = _check_run_rows(report)
         _raise_if_measurement_keys_collide(check_rows)
         if record:
@@ -1565,30 +1962,212 @@ class App:
         return report
 
 
-def parse_pipeline_spec(pipeline_spec: str) -> tuple[Path, str]:
-    """Split ``path/to/pipeline.py[:app_variable]`` (default variable: ``app``)."""
+def parse_pipeline_address(pipeline_spec: str) -> tuple[Path, str | None]:
+    """Split ``path/to/pipeline.py[:app_variable]``, keeping "unnamed" distinct.
+
+    ``None`` means the address named no variable, which is a different fact
+    from naming ``app``: it is what lets the loader discover the App instead
+    of demanding one particular spelling.
+    """
     path_part, separator, variable_part = pipeline_spec.rpartition(":")
     if separator and path_part and variable_part.isidentifier():
         return Path(path_part), variable_part
-    return Path(pipeline_spec), "app"
+    return Path(pipeline_spec), None
 
 
-def import_pipeline_application(pipeline_spec: str) -> "App":
-    """Import ``path/to/pipeline.py[:app]`` and return its :class:`App`, loudly.
+def parse_pipeline_spec(pipeline_spec: str) -> tuple[Path, str]:
+    """Split ``path/to/pipeline.py[:app_variable]`` (default variable: ``app``).
 
-    One owner for the "address a pipeline by file" contract every vantage
-    needs -- the CLI's ``manifest``/``up``/``deploy``/``stale``, and any other
-    caller that must hold a user's pipeline (the workspace UI's pipeline
-    page). The pipeline file is arbitrary user code, so importing EXECUTES
-    it: any exception it raises is a boundary failure reported as a
-    ``ValueError`` naming the file, never a crash of the calling program.
+    For the callers that must commit to a NAME rather than resolve an App:
+    the bundle renderers bake the variable into generated DAG source without
+    ever importing the pipeline, so they cannot discover it. Prefer
+    :func:`resolve_pipeline_spec_for_rendering`, which reads the name out of
+    the pipeline instead of assuming it.
+    """
+    pipeline_file, app_variable = parse_pipeline_address(pipeline_spec)
+    return pipeline_file, app_variable if app_variable is not None else DEFAULT_APP_VARIABLE
+
+
+def application_variables_in_source(pipeline_source: str) -> tuple[str, ...]:
+    """Module-level names a pipeline file binds to an ``hflow.App(...)`` call.
+
+    A STATIC read, deliberately, and the counterpart to
+    :func:`discover_pipeline_application` rather than a competitor: that one
+    knows everything but has to import the pipeline, which means having the
+    pipeline's dependencies installed. The bundle renderers have neither -- the
+    user's dependencies live in the venv the bundle is about to build -- so
+    this reads the source instead and settles for what a reader of that file
+    would see.
+
+    Matches ``name = hflow.App(...)`` and ``name = App(...)`` at module scope
+    and nothing cleverer. An App returned by a factory is invisible here, which
+    is why an empty result means "could not tell", never "there is none": the
+    caller falls back rather than refusing something that works.
+    """
+    import ast
+
+    try:
+        module = ast.parse(pipeline_source)
+    except SyntaxError:
+        # Not this function's error to report: the renderers copy the file and
+        # the tasks import it, and both produce a better message than a scan.
+        return ()
+
+    def constructs_an_application(value: ast.expr) -> bool:
+        match value:
+            case ast.Call(func=ast.Attribute(attr="App")) | ast.Call(func=ast.Name(id="App")):
+                return True
+            case _:
+                return False
+
+    found: list[str] = []
+    for statement in module.body:
+        match statement:
+            case ast.Assign(targets=[ast.Name(id=name)], value=value) if constructs_an_application(
+                value
+            ):
+                found.append(name)
+            case ast.AnnAssign(target=ast.Name(id=name), value=value) if (
+                value is not None and constructs_an_application(value)
+            ):
+                found.append(name)
+    return tuple(found)
+
+
+def resolve_pipeline_spec_for_rendering(pipeline_spec: str) -> tuple[Path, str]:
+    """``(pipeline_file, app_variable)`` for a bundle renderer, read not assumed.
+
+    A rendered bundle bakes the variable name into DAG source that runs
+    somewhere else, days later. Defaulting it to ``app`` made a pipeline that
+    binds ``robot_app`` render and exit 0, then fail every stage task inside a
+    container with ``has no hflow.App named 'app'`` -- while every other
+    command discovered the name and worked. Reading the source closes that gap
+    without importing anything.
+
+    An explicit ``:name`` in the address always wins, unread. Otherwise: one
+    App in the source is used, several is refused (the caller must say which),
+    and none found falls back to ``app``, because a factory-built App is
+    invisible to a static scan and refusing it would break a working setup.
+    """
+    pipeline_file, addressed_variable = parse_pipeline_address(pipeline_spec)
+    if addressed_variable is not None:
+        return pipeline_file, addressed_variable
+    try:
+        source = pipeline_file.read_text()
+    except OSError:
+        # A missing or unreadable pipeline file is the renderer's error to
+        # report, with its own message; do not pre-empt it with a worse one.
+        return pipeline_file, DEFAULT_APP_VARIABLE
+    match application_variables_in_source(source):
+        case (sole_variable,):
+            return pipeline_file, sole_variable
+        case (_, _, *_) as several:
+            raise ValueError(
+                f"{pipeline_file} defines more than one hflow.App "
+                f"({', '.join(sorted(several))}); a rendered bundle has to name one, "
+                f"so address it as {pipeline_file}:{sorted(several)[0]}"
+            )
+        case _:
+            return pipeline_file, DEFAULT_APP_VARIABLE
+
+
+@dataclass(frozen=True)
+class SoleApplicationFound:
+    """Exactly one :class:`App` is defined in the pipeline module."""
+
+    variable_name: str
+    application: "App"
+
+
+@dataclass(frozen=True)
+class NoApplicationDefined:
+    """The module imported cleanly but binds no :class:`App` at all."""
+
+
+@dataclass(frozen=True)
+class SeveralApplicationsDefined:
+    """More than one :class:`App`, so the caller has to say which."""
+
+    variable_names: tuple[str, ...]
+
+
+ApplicationDiscovery = SoleApplicationFound | NoApplicationDefined | SeveralApplicationsDefined
+
+
+def discover_pipeline_application(pipeline_module: ModuleType) -> ApplicationDiscovery:
+    """Which :class:`App` an imported pipeline module defines, if one is obvious.
+
+    Scanning the module's own globals is deliberately the whole search. It
+    cannot reach into ``sys.modules``, so a shared helper that happens to
+    construct an App does not make every pipeline that ``import``s it
+    ambiguous -- only a name bound in the pipeline file itself counts, which
+    is the same set a reader of that file would name.
+
+    Definition order is preserved so the ambiguous case can suggest a real
+    address rather than an arbitrary one.
+    """
+    defined_applications = tuple(
+        (name, value) for name, value in vars(pipeline_module).items() if isinstance(value, App)
+    )
+    match defined_applications:
+        case ():
+            return NoApplicationDefined()
+        case ((sole_variable, sole_application),):
+            return SoleApplicationFound(variable_name=sole_variable, application=sole_application)
+        case _:
+            return SeveralApplicationsDefined(
+                variable_names=tuple(name for name, _ in defined_applications)
+            )
+
+
+def _add_pipeline_directory_to_import_path(pipeline_file: Path) -> None:
+    """Make the pipeline's own directory importable, like running it would.
+
+    ``python pipeline.py`` puts the script's directory on ``sys.path``, which
+    is why ``app.run()`` can ``import helpers`` from a sibling file and
+    loading that same file BY PATH could not: the CLI, the workspace UI, and
+    the generated DAG tasks all address a pipeline by path, so a multi-file
+    project raised ``ModuleNotFoundError`` at every vantage except the one
+    the quickstart uses. Restoring that one line of CPython's behavior is
+    what makes a pipeline an ordinary Python project.
+
+    The entry is left in place rather than restored around the import: a
+    step may import a sibling lazily, long after loading returns (inside a
+    check body, on the first episode), and each process loads exactly one
+    pipeline.
+    """
+    pipeline_directory = str(pipeline_file.resolve().parent)
+    if pipeline_directory not in sys.path:
+        sys.path.insert(0, pipeline_directory)
+
+
+def load_pipeline_application(pipeline_file: Path | str, app_variable: str | None = None) -> "App":
+    """Import a pipeline file by path and return its :class:`App`, loudly.
+
+    The one owner of the "address a pipeline by file" contract, for every
+    vantage that must hold a user's pipeline: the CLI's ``manifest``/``up``/
+    ``deploy``/``stale``, the workspace UI's pipeline page, and the generated
+    DAG tasks (through :func:`hflow.stage_execution.load_pipeline_application`,
+    a thin adapter that only translates the error type its boundary wants).
+
+    ``app_variable`` names the module global to take. ``None`` means the
+    caller did not say, and the App is resolved instead: the conventional
+    ``app`` if the file binds one, else the only :class:`App` the file
+    defines. Naming a variable that is absent stays an error either way --
+    an address that asks for something specific should never quietly get
+    something else.
+
+    The pipeline file is arbitrary user code, so importing EXECUTES it: any
+    exception it raises is a boundary failure reported as a ``ValueError``
+    naming the file, never a crash of the calling program.
     """
     import importlib.util
 
-    pipeline_file, app_variable = parse_pipeline_spec(pipeline_spec)
-    spec = importlib.util.spec_from_file_location("hflow_user_pipeline", pipeline_file)
+    pipeline_path = Path(pipeline_file)
+    _add_pipeline_directory_to_import_path(pipeline_path)
+    spec = importlib.util.spec_from_file_location("hflow_user_pipeline", pipeline_path)
     if spec is None or spec.loader is None:
-        raise ValueError(f"cannot import pipeline file {pipeline_file}")
+        raise ValueError(f"cannot import pipeline file {pipeline_path}")
     module = importlib.util.module_from_spec(spec)
     try:
         spec.loader.exec_module(module)
@@ -1597,10 +2176,42 @@ def import_pipeline_application(pipeline_spec: str) -> "App":
         # import time (sys.exit("set ROBOT_FLEET"), or a module-scope argparse)
         # would otherwise walk past `except Exception` and take the calling
         # program's exit status with it -- killing a long-lived UI server at
-        # startup. KeyboardInterrupt stays uncaught on purpose: that one
-        # belongs to whoever pressed it, not to the pipeline file.
-        raise ValueError(f"importing {pipeline_file} failed: {error}") from error
-    application = getattr(module, app_variable, None)
-    if not isinstance(application, App):
-        raise ValueError(f"{pipeline_file} has no hflow.App named {app_variable!r}")
-    return application
+        # startup, or failing an Airflow task with the pipeline's own exit
+        # code instead of a diagnosable message. KeyboardInterrupt stays
+        # uncaught on purpose: that one belongs to whoever pressed it.
+        raise ValueError(f"importing {pipeline_path} failed: {error}") from error
+    if app_variable is not None:
+        named_application = getattr(module, app_variable, None)
+        if not isinstance(named_application, App):
+            raise ValueError(f"{pipeline_path} has no hflow.App named {app_variable!r}")
+        return named_application
+    # The conventional name wins before discovery, so a file that binds `app`
+    # alongside a second App keeps resolving exactly as it always has.
+    conventional_application = getattr(module, DEFAULT_APP_VARIABLE, None)
+    if isinstance(conventional_application, App):
+        return conventional_application
+    match discover_pipeline_application(module):
+        case SoleApplicationFound(application=sole_application):
+            return sole_application
+        case NoApplicationDefined():
+            raise ValueError(
+                f"{pipeline_path} defines no hflow.App -- a pipeline file assigns one at "
+                f'module level, e.g. `{DEFAULT_APP_VARIABLE} = hflow.App("my-pipeline")`'
+            )
+        case SeveralApplicationsDefined(variable_names=variable_names):
+            named = ", ".join(repr(name) for name in variable_names)
+            raise ValueError(
+                f"{pipeline_path} defines {len(variable_names)} hflow.App objects ({named}); "
+                f"address the one you mean as {pipeline_path}:{variable_names[0]}"
+            )
+
+
+def import_pipeline_application(pipeline_spec: str) -> "App":
+    """Import ``path/to/pipeline.py[:app]`` and return its :class:`App`, loudly.
+
+    The spec-string front door to :func:`load_pipeline_application`, for the
+    callers that take a pipeline address as one user-supplied argument. An
+    address without ``:variable`` leaves the App to be discovered.
+    """
+    pipeline_file, app_variable = parse_pipeline_address(pipeline_spec)
+    return load_pipeline_application(pipeline_file, app_variable)

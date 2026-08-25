@@ -1,9 +1,10 @@
 """Command-line entry point.
 
-Subcommands: ``curate``, ``export snapshot``, ``stale``, ``doctor``,
-``manifest``, the Compose runtime family ``up``/``down``/``ingest``/``status``,
-``deploy`` for bring-your-own Airflow, and ``serve`` for the workspace HTTP
-server (a separate ``hflow-server`` package, imported only when invoked).
+Subcommands: ``curate``, ``dataset create``, ``export snapshot``, ``stale``,
+``doctor``, ``manifest``, the Compose runtime family
+``up``/``down``/``ingest``/``status``, ``deploy`` for bring-your-own Airflow,
+and ``serve`` for the workspace HTTP server (a separate ``hflow-server``
+package, imported only when invoked).
 Everything the CLI does is a thin call into the library: no behavior lives
 only here.
 
@@ -28,9 +29,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from hflow import __version__
-from hflow.app import DATA_ROOT_ENVIRONMENT_VARIABLE, DEFAULT_DATA_ROOT, parse_pipeline_spec
+from hflow.app import (
+    DEFAULT_DATA_ROOT,
+    default_data_root,
+    resolve_pipeline_spec_for_rendering,
+)
 from hflow.curation import curate, stale_episodes
 from hflow.doctor import diagnose
+from hflow.project import (
+    DEFAULT_PIPELINE_FILE_NAME,
+    PROJECT_CONFIG_FILE_NAME,
+    ProjectConfig,
+    find_project_config,
+)
 from hflow.runtime._deploy import DEFAULT_DEPLOY_VENV_PYTHON
 from hflow.steps import RUN_PROFILES
 from hflow.storage import is_bucket_url
@@ -50,18 +61,57 @@ DEFAULT_SERVER_PORT = 4356
 
 
 def _environment_data_root() -> str:
-    """The data root the App itself would resolve: ``HFLOW_DATA_ROOT`` wins.
+    """The data root these commands default to when no flag names one.
 
-    CLI defaults derive from the same variable so a shell configured for one
-    workspace addresses that workspace's catalog and runtime consistently --
-    never a hardcoded ``./data`` beside it.
+    Literally :func:`hflow.app.default_data_root`, as a string for the URL and
+    path joins below. Shared rather than reimplemented: an App written as
+    ``hflow.App("name")`` resolves its root through the same function, so
+    ``hflow ingest`` writes the workspace ``hflow curate`` reads.
     """
-    return os.environ.get(DATA_ROOT_ENVIRONMENT_VARIABLE) or DEFAULT_DATA_ROOT
+    return str(default_data_root())
 
 
 def _default_catalog_location() -> str:
     # A string join, not Path: bucket URLs (gs://...) must survive.
     return f"{_environment_data_root().rstrip('/')}/{CATALOG_DIRECTORY_NAME}"
+
+
+def _configured_pipeline_spec() -> str | None:
+    """The pipeline this project points at, if it points at one.
+
+    ``hflow.toml``'s ``pipeline``, else ``pipeline.py`` beside it. ``None`` is
+    an ordinary answer, not a failure: ``hflow serve`` runs fine without a
+    pipeline and simply turns its pipeline page off.
+
+    The conventional fallback looks in the PROJECT's directory, not the
+    working one, whenever an ``hflow.toml`` located the project. Otherwise
+    running a command from ``notebooks/`` would resolve the data root from the
+    project and the pipeline from wherever the shell happened to be, which is
+    the one combination guaranteed to address two different things.
+    """
+    project_config = find_project_config()
+    if isinstance(project_config, ProjectConfig):
+        if project_config.pipeline_file is not None:
+            return str(project_config.pipeline_file)
+        search_directory = project_config.config_file.parent
+    else:
+        search_directory = Path.cwd()
+    conventional_pipeline = search_directory / DEFAULT_PIPELINE_FILE_NAME
+    return str(conventional_pipeline) if conventional_pipeline.is_file() else None
+
+
+def _require_pipeline_spec(explicit_pipeline: str | None) -> str:
+    """The pipeline address for a command that cannot run without one."""
+    if explicit_pipeline is not None:
+        return explicit_pipeline
+    configured_pipeline = _configured_pipeline_spec()
+    if configured_pipeline is None:
+        raise ValueError(
+            "no pipeline found: pass --pipeline path/to/pipeline.py, add "
+            f'`pipeline = "..."` to {PROJECT_CONFIG_FILE_NAME}, or run from a '
+            f"directory holding {DEFAULT_PIPELINE_FILE_NAME}"
+        )
+    return configured_pipeline
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -105,7 +155,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=_default_catalog_location(),
         help=(
             "catalog directory or object-store prefix "
-            f"(default: $HFLOW_DATA_ROOT/catalog, else {DEFAULT_DATA_ROOT}/catalog)"
+            f"(default: $HFLOW_DATA_ROOT, else {PROJECT_CONFIG_FILE_NAME}'s data_root, "
+            f"else {DEFAULT_DATA_ROOT} -- plus /catalog)"
         ),
     )
     curate_output_group = curate_parser.add_mutually_exclusive_group()
@@ -115,14 +166,58 @@ def _build_parser() -> argparse.ArgumentParser:
         default=f"{_environment_data_root().rstrip('/')}/manifest.parquet",
         help=(
             "manifest path or object-store URL "
-            f"(default: $HFLOW_DATA_ROOT/manifest.parquet, else "
-            f"{DEFAULT_DATA_ROOT}/manifest.parquet)"
+            f"(default: $HFLOW_DATA_ROOT, else {PROJECT_CONFIG_FILE_NAME}'s data_root, "
+            f"else {DEFAULT_DATA_ROOT} -- plus /manifest.parquet)"
         ),
     )
     curate_output_group.add_argument(
         "--dry-run",
         action="store_true",
         help="run the query and report row count and coverage without writing a manifest",
+    )
+
+    dataset_parser = subparsers.add_parser(
+        "dataset",
+        help="create version-pinned dataset manifests from the pipeline's own policy",
+    )
+    dataset_subparsers = dataset_parser.add_subparsers(dest="dataset_command", required=True)
+    dataset_create_parser = dataset_subparsers.add_parser(
+        "create",
+        help="write an immutable manifest of every episode this pipeline stands behind",
+        description=(
+            "Select the current generation of every source recording that is not "
+            "quarantined, was produced by this pipeline's current transform, and "
+            "has every registered step recorded at its current version. Writes "
+            "manifests/<name>-<timestamp>.parquet plus a .json recording the "
+            "effective SQL and the versions it required. Importing EXECUTES the "
+            "pipeline file, so run this in the pipeline's own environment."
+        ),
+    )
+    dataset_create_parser.add_argument(
+        "name",
+        help="a name for the dataset; slugified into the manifest's filename",
+    )
+    dataset_create_parser.add_argument(
+        "--pipeline",
+        default=None,
+        help=(
+            "pipeline file, optionally with the App variable name: "
+            "path/to/pipeline.py[:app]. Defaults to hflow.toml's `pipeline`, "
+            f"else ./{DEFAULT_PIPELINE_FILE_NAME}"
+        ),
+    )
+    dataset_create_parser.add_argument(
+        "--sql",
+        default=None,
+        help=(
+            "replace the default policy with your own SELECT, keeping the "
+            "immutable artifact and the provenance record"
+        ),
+    )
+    dataset_create_parser.add_argument(
+        "--print-sql",
+        action="store_true",
+        help="print the SQL this would run and exit, writing nothing",
     )
 
     export_parser = subparsers.add_parser(
@@ -143,7 +238,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=_default_catalog_location(),
         help=(
             "catalog directory or object-store prefix "
-            f"(default: $HFLOW_DATA_ROOT/catalog, else {DEFAULT_DATA_ROOT}/catalog)"
+            f"(default: $HFLOW_DATA_ROOT, else {PROJECT_CONFIG_FILE_NAME}'s data_root, "
+            f"else {DEFAULT_DATA_ROOT} -- plus /catalog)"
         ),
     )
     snapshot_export_parser.add_argument(
@@ -191,15 +287,19 @@ def _build_parser() -> argparse.ArgumentParser:
         default=_default_catalog_location(),
         help=(
             "catalog directory or object-store prefix "
-            f"(default: $HFLOW_DATA_ROOT/catalog, else {DEFAULT_DATA_ROOT}/catalog)"
+            f"(default: $HFLOW_DATA_ROOT, else {PROJECT_CONFIG_FILE_NAME}'s data_root, "
+            f"else {DEFAULT_DATA_ROOT} -- plus /catalog)"
         ),
     )
-    stale_group = stale_parser.add_mutually_exclusive_group(required=True)
+    # Not required: without either flag the pipeline is resolved from
+    # hflow.toml or ./pipeline.py, exactly as the other commands do.
+    stale_group = stale_parser.add_mutually_exclusive_group()
     stale_group.add_argument(
         "--pipeline",
         help=(
             "pipeline file to compute the current version from, optionally with the "
-            "App variable name: path/to/pipeline.py[:app]"
+            "App variable name: path/to/pipeline.py[:app]. Defaults to hflow.toml's "
+            f"`pipeline`, else ./{DEFAULT_PIPELINE_FILE_NAME}"
         ),
     )
     stale_group.add_argument(
@@ -245,8 +345,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     manifest_parser.add_argument(
         "--pipeline",
-        required=True,
-        help="pipeline file, optionally with the App variable name: path/to/pipeline.py[:app]",
+        default=None,
+        help=(
+            "pipeline file, optionally with the App variable name: "
+            "path/to/pipeline.py[:app]. Defaults to hflow.toml's `pipeline`, "
+            f"else ./{DEFAULT_PIPELINE_FILE_NAME}"
+        ),
     )
 
     up_parser = subparsers.add_parser(
@@ -260,8 +364,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     up_parser.add_argument(
         "--pipeline",
-        required=True,
-        help="pipeline file, optionally with the App variable name: path/to/pipeline.py[:app]",
+        default=None,
+        help=(
+            "pipeline file, optionally with the App variable name: "
+            "path/to/pipeline.py[:app]. Defaults to hflow.toml's `pipeline`, "
+            f"else ./{DEFAULT_PIPELINE_FILE_NAME}"
+        ),
     )
     up_parser.add_argument(
         "--data-root",
@@ -270,7 +378,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "host directory mounted at /opt/airflow/data, or a bucket URL "
             "(gs://, s3://, az://) the runtime talks to natively "
-            f"(default: $HFLOW_DATA_ROOT, else {DEFAULT_DATA_ROOT})"
+            f"(default: $HFLOW_DATA_ROOT, else {PROJECT_CONFIG_FILE_NAME}'s "
+            f"data_root, else {DEFAULT_DATA_ROOT})"
         ),
     )
     up_parser.add_argument(
@@ -317,8 +426,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     deploy_parser.add_argument(
         "--pipeline",
-        required=True,
-        help="pipeline file, optionally with the App variable name: path/to/pipeline.py[:app]",
+        default=None,
+        help=(
+            "pipeline file, optionally with the App variable name: "
+            "path/to/pipeline.py[:app]. Defaults to hflow.toml's `pipeline`, "
+            f"else ./{DEFAULT_PIPELINE_FILE_NAME}"
+        ),
     )
     deploy_parser.add_argument(
         "--data-root-uri",
@@ -391,11 +504,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help="run profile: which stage sub-DAGs the master enables (default: full)",
     )
     ingest_parser.add_argument(
+        "--all-stages",
+        action="store_true",
+        help=(
+            "run every stage of --profile on every episode, instead of only the "
+            "stages whose steps the catalog does not already record at their "
+            "current versions. Use it when an artifact was deleted out from "
+            "under a recorded step -- that is the one thing the catalog cannot "
+            "see. Applies only when the episodes are processed in this process"
+        ),
+    )
+    ingest_parser.add_argument(
         "--online",
         action="store_true",
         help=(
             "latency-first online lane: process the URIs as one immediate batch "
             "(no bin-packing, no stagger) -- for per-episode runs as data lands"
+        ),
+    )
+    ingest_parser.add_argument(
+        "--pipeline",
+        default=None,
+        help=(
+            "pipeline to run when no runtime is addressed and the episodes are "
+            "processed in this process; ignored when a bundle or --airflow-url "
+            f"is addressed, since the runtime holds its own copy. Defaults to "
+            f"{PROJECT_CONFIG_FILE_NAME}'s `pipeline`, else ./{DEFAULT_PIPELINE_FILE_NAME}"
         ),
     )
 
@@ -496,25 +630,33 @@ def _remote_endpoint_for_command(arguments: argparse.Namespace) -> "RemoteRuntim
     return resolve_remote_endpoint(airflow_url=arguments.airflow_url, dag_id=arguments.dag_id)
 
 
-def _resolve_bundle_dir(bundle_dir_argument: Path | None) -> Path:
-    """The bundle a command addresses when ``--bundle-dir`` was not given.
+def _found_bundle_dir(bundle_dir_argument: Path | None) -> Path | None:
+    """The bundle this command addresses, or ``None`` if there is none.
 
-    Local-mode runtimes render at ``<data-root>/runtime`` -- resolved from
-    ``HFLOW_DATA_ROOT`` when set (matching where ``up`` rendered), else the
-    ``./data/runtime`` default; bucket-mode runtimes have no local data root
-    and render at ``./runtime``. Try each in that order, falling back to the
-    primary candidate so ``load_bundle``'s error names it.
+    ``hflow.runtime.find_bundle_directory`` owns the probe, so the CLI and the
+    workspace server cannot disagree about which runtime a workspace has.
     """
+    from hflow.runtime import find_bundle_directory
+
     if bundle_dir_argument is not None:
         return bundle_dir_argument
+    return find_bundle_directory(_environment_data_root())
+
+
+def _resolve_bundle_dir(bundle_dir_argument: Path | None) -> Path:
+    """The bundle a command addresses, naming a candidate even when absent.
+
+    For the commands that cannot proceed without one (``down``, ``status``):
+    falling back to the primary candidate is what makes ``load_bundle``'s
+    error name a path the user recognizes rather than reporting nothing.
+    """
+    found_bundle_dir = _found_bundle_dir(bundle_dir_argument)
+    if found_bundle_dir is not None:
+        return found_bundle_dir
     environment_data_root = _environment_data_root()
-    candidates = [Path(RUNTIME_BUNDLE_DIRECTORY_NAME)]
-    if not is_bucket_url(environment_data_root):
-        candidates.insert(0, Path(environment_data_root) / RUNTIME_BUNDLE_DIRECTORY_NAME)
-    for candidate in candidates:
-        if (candidate / "docker-compose.yaml").is_file():
-            return candidate
-    return candidates[0]
+    if is_bucket_url(environment_data_root):
+        return Path(RUNTIME_BUNDLE_DIRECTORY_NAME)
+    return Path(environment_data_root) / RUNTIME_BUNDLE_DIRECTORY_NAME
 
 
 def _import_pipeline_app(pipeline_spec: str) -> "App":
@@ -529,9 +671,31 @@ def _import_pipeline_app(pipeline_spec: str) -> "App":
     return import_pipeline_application(pipeline_spec)
 
 
+def _command_dataset_create(arguments: argparse.Namespace) -> int:
+    from hflow.dataset import create_dataset, default_dataset_sql
+
+    try:
+        app = _import_pipeline_app(_require_pipeline_spec(arguments.pipeline))
+    except ValueError as error:
+        print(f"dataset create: {error}", file=sys.stderr)
+        return 2
+    if arguments.print_sql:
+        # The policy is never hidden: it can always be read, edited, and
+        # handed back through --sql or `hflow curate`.
+        print(arguments.sql if arguments.sql is not None else default_dataset_sql(app))
+        return 0
+    try:
+        dataset = create_dataset(app, arguments.name, sql=arguments.sql)
+    except (ValueError, FileNotFoundError, FileExistsError) as error:
+        print(f"dataset create: {error}", file=sys.stderr)
+        return 2
+    print(dataset.summary())
+    return 0
+
+
 def _command_manifest(arguments: argparse.Namespace) -> int:
     try:
-        app = _import_pipeline_app(arguments.pipeline)
+        app = _import_pipeline_app(_require_pipeline_spec(arguments.pipeline))
     except ValueError as error:
         print(f"manifest: {error}", file=sys.stderr)
         return 2
@@ -541,11 +705,11 @@ def _command_manifest(arguments: argparse.Namespace) -> int:
 
 def _command_stale(arguments: argparse.Namespace) -> int:
     schema_version: str | None = None
-    if arguments.pipeline is not None:
+    if arguments.pipeline_version is None:
         from hflow.format import EPISODE_FORMAT_VERSION
 
         try:
-            app = _import_pipeline_app(arguments.pipeline)
+            app = _import_pipeline_app(_require_pipeline_spec(arguments.pipeline))
         except ValueError as error:
             print(f"stale: {error}", file=sys.stderr)
             return 2
@@ -584,7 +748,13 @@ def _command_up(arguments: argparse.Namespace) -> int:
         started_summary,
     )
 
-    pipeline_file, app_variable = parse_pipeline_spec(arguments.pipeline)
+    try:
+        pipeline_file, app_variable = resolve_pipeline_spec_for_rendering(
+            _require_pipeline_spec(arguments.pipeline)
+        )
+    except ValueError as error:
+        print(f"up: {error}", file=sys.stderr)
+        return 2
     hflow_source = (
         arguments.hflow_source if arguments.hflow_source is not None else infer_hflow_source()
     )
@@ -667,7 +837,13 @@ def _command_up(arguments: argparse.Namespace) -> int:
 def _command_deploy(arguments: argparse.Namespace) -> int:
     from hflow.runtime._deploy import DeployConfig, render_deploy_bundle
 
-    pipeline_file, app_variable = parse_pipeline_spec(arguments.pipeline)
+    try:
+        pipeline_file, app_variable = resolve_pipeline_spec_for_rendering(
+            _require_pipeline_spec(arguments.pipeline)
+        )
+    except ValueError as error:
+        print(f"deploy: {error}", file=sys.stderr)
+        return 2
     try:
         config = DeployConfig(
             pipeline_file=pipeline_file,
@@ -709,6 +885,88 @@ def _command_down(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _ingest_in_process(arguments: argparse.Namespace) -> int:
+    """Ingest with no runtime at all: import the pipeline and run the stages.
+
+    The third executor. A workspace with no rendered bundle and no
+    ``HFLOW_AIRFLOW_URL`` used to be a failure (``run `hflow up` first``);
+    it is now an ordinary case, because the scale that needs a scheduler and
+    the scale that needs one command are different scales.
+
+    ``--online`` and ``--bundle-dir`` have nothing to answer here: there is
+    one process, so there are no lanes to pick between and no bundle to
+    address. ``--profile`` still selects which stages run, and ``--all-stages``
+    turns off the per-episode planning that would otherwise skip the ones the
+    catalog already records as current.
+    """
+    from hflow.stage_execution import run_stages_directly
+    from hflow.stage_planning import StageSelection
+    from hflow.steps import stages_for_profile
+
+    try:
+        app = _import_pipeline_app(_require_pipeline_spec(arguments.pipeline))
+    except ValueError as error:
+        print(f"ingest: {error}", file=sys.stderr)
+        return 2
+    stages = stages_for_profile(arguments.profile)
+    selection = StageSelection.EVERY_STAGE if arguments.all_stages else StageSelection.OUTSTANDING
+    print(
+        f"ingest: no runtime addressed; processing {len(arguments.uris)} episode(s) "
+        f"in this process against {app.data_root}",
+        file=sys.stderr,
+    )
+    try:
+        outcomes = run_stages_directly(app, list(arguments.uris), stages, selection=selection)
+    except RuntimeError as error:
+        # The mass-failure gates, verbatim: the same budgets a scheduled run
+        # applies, so a corpus that would fail there fails here too.
+        print(f"ingest: {error}", file=sys.stderr)
+        _print_ingest_failure_hint()
+        return 1
+    for outcome in outcomes:
+        counts = outcome.counts
+        # The skipped count is printed beside the processed one, never folded
+        # into it: "0 processed" on a corpus that is entirely up to date should
+        # read as nothing left to do, not as nothing having happened.
+        already_current = (
+            f", {outcome.skipped_as_current} already current" if outcome.skipped_as_current else ""
+        )
+        print(
+            f"{outcome.stage.value}: {counts['processed']} processed, "
+            f"{counts['quarantined']} quarantined, {counts['errors']} errors{already_current}"
+        )
+    if not any(outcome.counts["errors"] for outcome in outcomes):
+        return 0
+    _print_ingest_failure_hint()
+    # Exit 1, per the convention in docs/FORMAT.md: the command ran and found
+    # something to report. Under the mass-failure budget an episode that failed
+    # is not fatal to the RUN, but it is still a failure, and a `hflow ingest
+    # ... && next-step` script has to be able to see it. The budget decides
+    # whether to keep going, never whether to report.
+    return 1
+
+
+def _print_ingest_failure_hint() -> None:
+    """Where the record of a failed episode lives -- both places it can be.
+
+    Worth spelling out on this path: unlike a scheduled run there is no task
+    log behind this executor to go and read, and the two kinds of failure are
+    recorded in two different tables. A recording that never canonicalized has
+    no catalog row to be, so it lands in the failure ledger; a CHECK that
+    crashed leaves an ordinary episode whose step recorded `error`, and
+    pointing only at the ledger would send that user looking in an empty table.
+    """
+    print(
+        "ingest: a recording that produced no episode is recorded in "
+        "ingest_failures, and a step that crashed on one that did is recorded "
+        "on the episode --\n"
+        '  hflow curate "SELECT source_uri, failure_kind, message FROM ingest_failures"\n'
+        '  hflow curate "SELECT episode_id, check_name, error FROM check_runs '
+        "WHERE status = 'error'\"",
+        file=sys.stderr,
+    )
+
+
 def _command_ingest(arguments: argparse.Namespace) -> int:
     from posixpath import normpath
 
@@ -725,8 +983,10 @@ def _command_ingest(arguments: argparse.Namespace) -> int:
         if uri.startswith("/") or normpath(uri).startswith(".."):
             print(
                 f"ingest: {uri!r} is not relative to the data root -- URIs are "
-                "resolved against the runtime's configured data root "
-                "(e.g. `episodes-in/run_0001.mcap`)",
+                f"resolved against the workspace this project uses ({_environment_data_root()}), "
+                "so name them from there (e.g. `episodes-in/run_0001.mcap`). "
+                f"Set $HFLOW_DATA_ROOT or {PROJECT_CONFIG_FILE_NAME}'s data_root "
+                "to point at another workspace",
                 file=sys.stderr,
             )
             return 2
@@ -741,8 +1001,15 @@ def _command_ingest(arguments: argparse.Namespace) -> int:
         dag_id = endpoint.dag_id
         watch_location = endpoint.base_url
     else:
+        bundle_dir = _found_bundle_dir(arguments.bundle_dir)
+        if bundle_dir is None:
+            # Nothing addressed: run it here rather than refusing. Starting
+            # Airflow is several GB of images and services, far too much to
+            # do on someone's behalf inside an ordinary ingest, and far more
+            # than a handful of episodes needs.
+            return _ingest_in_process(arguments)
         try:
-            paths = load_bundle(_resolve_bundle_dir(arguments.bundle_dir))
+            paths = load_bundle(bundle_dir)
         except (ValueError, FileNotFoundError) as error:
             print(f"ingest: {error}", file=sys.stderr)
             return 2
@@ -892,7 +1159,10 @@ def _command_serve(arguments: argparse.Namespace) -> int:
             port=arguments.port,
             open_browser=not arguments.no_browser,
             read_only=arguments.read_only,
-            pipeline=arguments.pipeline,
+            # A project that names its pipeline gets the pipeline page without
+            # asking; a directory that holds none still serves the catalog,
+            # so this stays the one place a missing pipeline is not an error.
+            pipeline=arguments.pipeline or _configured_pipeline_spec(),
         )
     except ValueError as error:
         # Its own block, before anything is built: nothing is serving, so this
@@ -933,7 +1203,17 @@ def _command_serve(arguments: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    arguments = _build_parser().parse_args(argv)
+    try:
+        parser = _build_parser()
+    except ValueError as error:
+        # Building the parser resolves defaults, which reads hflow.toml. A
+        # file that exists and cannot be understood is refused rather than
+        # skipped -- falling back to ./data because of a typo would write a
+        # corpus into a directory nobody chose -- but it is the user's own
+        # just-edited file, so it earns a message and exit 2, not a traceback.
+        print(f"hflow: {error}", file=sys.stderr)
+        return 2
+    arguments = parser.parse_args(argv)
 
     logging.basicConfig(
         level=logging.INFO if arguments.verbose else logging.WARNING,
@@ -943,6 +1223,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if arguments.command == "curate":
         return _command_curate(arguments)
+    if arguments.command == "dataset":
+        if arguments.dataset_command == "create":
+            return _command_dataset_create(arguments)
+        raise AssertionError(f"unhandled dataset command {arguments.dataset_command!r}")
     if arguments.command == "export":
         if arguments.export_command == "snapshot":
             return _command_export_snapshot(arguments)

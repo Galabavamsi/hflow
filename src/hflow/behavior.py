@@ -84,4 +84,25 @@ notes and not only here.
 # bytes for the same input. See the module docstring for the rule. Annotated
 # as ``str`` rather than inferred as a literal: the whole point is that it
 # changes.
-TRANSFORM_BEHAVIOR_VERSION: str = "2"
+#
+# "3": bulk non-camera channels (point clouds, occupancy grids -- anything
+# averaging over BULK_MESSAGE_BYTES per message) now get their own chunk
+# group instead of sharing chunks with proprio-sized telemetry, and the
+# resolved topic-to-group map is written into provenance/v1. Both change the
+# bytes. docs/BENCHMARKS.md measured the old behavior dragging 230 MB through
+# an /imu scan because /imu shared chunks with lidar, against 4 MB grouped by
+# read pattern; a recording with no bulk channels is laid out exactly as
+# before and only re-versions because this constant moved.
+#
+# "4": chunk targets are now derived per group from that group's own byte rate
+# and the preset's read window, instead of one flat 800 KB for every group.
+# Measured on the reference recording (docs/BENCHMARKS.md): 3.79 chunk fetches
+# per training sample fetching 11.21 MB, against 9.18 fetching 6.65 MB at the
+# flat 800 KB this replaced -- half the round trips for 1.7x the bytes, the
+# trade worth making when round trips dominate. It is NOT the measured minimum
+# of fetches x bytes: a flat 5.41 MB beat it there on that recording, and the
+# default stands anyway because 5.41 MB is that recording's camera rate rather
+# than a principle. Groups whose rate falls below the floor -- every state
+# group there, every synthetic fixture -- keep their previous layout and
+# re-version only because this constant moved.
+TRANSFORM_BEHAVIOR_VERSION: str = "4"

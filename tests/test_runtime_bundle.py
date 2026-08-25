@@ -176,7 +176,7 @@ def test_compose_hflow_source_mount_absent_when_unset(
     ]
     _, script = compose["services"]["user-venv-init"]["command"]
     assert f"hflow_install_target='hflow=={hflow.__version__}'" in script
-    assert 'pip install --no-cache-dir "$$hflow_install_target"' in script
+    assert '"$$hflow_install_target"' in script
     assert "if [ -d /opt/hflow-src ]" not in script
 
 
@@ -258,13 +258,27 @@ def test_user_venv_init_builds_with_content_hash_marker(
     assert flag == "-c"
     # Compose interpolation escaping: shell variables stay $$-escaped in YAML.
     assert "sha256sum" in script
-    assert "python -m venv /opt/venvs/user" in script
-    assert "pip install --no-cache-dir -r /opt/user/requirements.txt" in script
+    # uv, which the Airflow image ships on PATH, with the image's own
+    # interpreter: a managed CPython would break the external-python pickle
+    # boundary between Airflow's process and the task's.
+    assert 'uv venv --python "$$(command -v python)" /opt/venvs/user' in script
+    assert "export UV_PYTHON_DOWNLOADS=never" in script
+    # The image exports VIRTUAL_ENV pointing at Airflow's OWN environment.
+    assert "unset VIRTUAL_ENV" in script
+    assert "export UV_PROJECT_ENVIRONMENT=/opt/venvs/user" in script
+    # A locked project gets the versions it locked; --inexact keeps uv from
+    # pruning pendulum and hflow, which are ours rather than the user's, and
+    # --no-install-project keeps a build backend out of the read-only mount.
+    assert "uv sync --project /opt/user --frozen --inexact --no-install-project" in script
+    assert 'uv pip install --python "$$venv_python" -r /opt/user/requirements.txt' in script
     # The install target is a shell variable so bucket-mode bundles can add
     # the [bucket] extra; local mode renders the bare source path. Shell
     # variables stay $$-escaped in the YAML for Compose's interpolation.
     assert "hflow_install_target='/opt/hflow-src'" in script
-    assert 'pip install --no-cache-dir "$$hflow_install_target"' in script
+    assert '"$$hflow_install_target"' in script
+    # A user lockfile can now win the resolution, so the version the DAGs were
+    # rendered by has to be checked rather than assumed.
+    assert "these DAGs were rendered by" in script
     assert "marker_file=/opt/venvs/user/.hflow-content-hash" in script
     assert "skipping rebuild" in script
     assert "exit 0" in script
@@ -276,8 +290,12 @@ def test_user_venv_init_builds_with_content_hash_marker(
     # Exactly pendulum, pinned to the image's constraint; lazy_object_proxy
     # never crosses into the venv so it is deliberately absent from this list.
     assert 'bootstrap_packages="pendulum==3.2.0"' in script
-    assert "pip install --no-cache-dir $$bootstrap_packages" in script
+    assert '$$bootstrap_packages "$$hflow_install_target"' in script
     assert 'echo "bootstrap: $$bootstrap_packages"' in script
+    # A project's own inputs join the rebuild hash, so editing the pipeline
+    # still refreshes code without rebuilding dependencies.
+    assert "cat /opt/user/pyproject.toml" in script
+    assert "cat /opt/user/uv.lock" in script
 
 
 def test_user_venv_init_prewarms_ffmpeg_best_effort(config: RuntimeConfig, tmp_path: Path) -> None:
@@ -686,6 +704,35 @@ def test_pipeline_and_requirements_copied(config: RuntimeConfig, tmp_path: Path)
     paths, _ = _render(config, tmp_path / "bundle")
     assert (paths.user_dir / "my_pipeline.py").read_text() == PIPELINE_SOURCE
     assert (paths.user_dir / "requirements.txt").read_text() == "numpy>=2\n"
+
+
+def test_modules_beside_the_pipeline_are_copied(config: RuntimeConfig, tmp_path: Path) -> None:
+    """A pipeline is an ordinary Python project: `import rig_constants` has to
+    resolve inside every task, not only on the author's machine."""
+    (tmp_path / "rig_constants.py").write_text("EXPECTED_CAMERA_HZ = 30.0\n")
+
+    paths, _ = _render(config, tmp_path / "bundle")
+
+    assert (paths.user_dir / "rig_constants.py").is_file()
+
+
+def test_the_workspace_is_never_copied_whatever_it_is_called(
+    config: RuntimeConfig, tmp_path: Path
+) -> None:
+    """The corpus is MOUNTED into the containers, never shipped. Excluding the
+    literal name `data` excluded exactly one spelling of a configurable thing,
+    so a project whose hflow.toml said `data_root = "./workspace"` duplicated
+    its whole corpus into the bundle on every `hflow up`."""
+    from dataclasses import replace
+
+    workspace = tmp_path / "workspace"
+    (workspace / "episodes-in").mkdir(parents=True)
+    (workspace / "episodes-in" / "big.mcap").write_bytes(b"x" * 4096)
+
+    paths, _ = _render(replace(config, data_root=workspace), tmp_path / "bundle")
+
+    assert not (paths.user_dir / "workspace").exists()
+    assert (paths.user_dir / "my_pipeline.py").is_file()
 
 
 def test_missing_pipeline_file_raises(config: RuntimeConfig, tmp_path: Path) -> None:

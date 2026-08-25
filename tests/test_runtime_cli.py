@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 import hflow
-from hflow.app import parse_pipeline_spec
+from hflow.app import parse_pipeline_spec, resolve_pipeline_spec_for_rendering
 from hflow.cli import main
 from hflow.runtime import AirflowHealth, RuntimeConfig, render_bundle
 from hflow.runtime._client import AirflowClient, AirflowClientError, PasswordCredentials
@@ -79,6 +79,95 @@ def test_parse_pipeline_spec_variants() -> None:
         Path("dir/pipe.py:not-an-identifier"),
         "app",
     )
+
+
+class TestNamingTheAppInARenderedBundle:
+    """The renderers bake the App's variable name into DAG source that runs
+    somewhere else, days later, without importing the pipeline. Defaulting it
+    to `app` made a pipeline binding `robot_app` render and exit 0, then fail
+    every stage task inside a container -- while every other command discovered
+    the name and worked."""
+
+    @staticmethod
+    def _write(tmp_path: Path, body: str) -> Path:
+        pipeline_file = tmp_path / "pipeline.py"
+        pipeline_file.write_text(body)
+        return pipeline_file
+
+    def test_the_name_the_pipeline_actually_binds_is_used(self, tmp_path: Path) -> None:
+        pipeline_file = self._write(tmp_path, "import hflow\n\nrobot_app = hflow.App('fleet')\n")
+
+        assert resolve_pipeline_spec_for_rendering(str(pipeline_file)) == (
+            pipeline_file,
+            "robot_app",
+        )
+
+    def test_an_explicit_name_in_the_address_still_wins(self, tmp_path: Path) -> None:
+        pipeline_file = self._write(tmp_path, "import hflow\n\nrobot_app = hflow.App('fleet')\n")
+
+        assert resolve_pipeline_spec_for_rendering(f"{pipeline_file}:something_else") == (
+            pipeline_file,
+            "something_else",
+        )
+
+    def test_two_apps_are_refused_rather_than_guessed(self, tmp_path: Path) -> None:
+        pipeline_file = self._write(
+            tmp_path,
+            "import hflow\n\nkitchen = hflow.App('a')\ngarage = hflow.App('b')\n",
+        )
+
+        with pytest.raises(ValueError, match=r"more than one hflow\.App"):
+            resolve_pipeline_spec_for_rendering(str(pipeline_file))
+
+    def test_an_app_a_static_read_cannot_see_falls_back_rather_than_refusing(
+        self, tmp_path: Path
+    ) -> None:
+        """A factory-built App is invisible to a source scan. Refusing it would
+        break a setup that works today, so the historical default stands."""
+        pipeline_file = self._write(
+            tmp_path,
+            "import hflow\n\n\ndef build():\n    return hflow.App('made')\n\n\napp = build()\n",
+        )
+
+        assert resolve_pipeline_spec_for_rendering(str(pipeline_file)) == (pipeline_file, "app")
+
+    def test_up_renders_the_discovered_name_into_the_dag(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        compose_calls: list[list[str]],
+        healthy_client: None,
+    ) -> None:
+        """End to end, because the defect was that rendering SUCCEEDED: the
+        bundle only reveals the wrong name once a task runs in a container."""
+        self._write(
+            tmp_path,
+            "import hflow\n\nrobot_app = hflow.App('fleet', data_root='/opt/airflow/data')\n",
+        )
+        (tmp_path / "hflow.toml").write_text('data_root = "./data"\n')
+        monkeypatch.delenv("HFLOW_DATA_ROOT", raising=False)
+        monkeypatch.chdir(tmp_path)
+
+        assert main(["up"]) == 0
+
+        rendered = (tmp_path / "data" / "runtime" / "dags" / "ingest_sync.py").read_text()
+        assert 'load_pipeline_application(pipeline_path, "robot_app")' in rendered
+
+
+def test_addressing_a_pipeline_by_spec_string_imports_its_siblings(tmp_path: Path) -> None:
+    # The same multi-file guarantee the runtime path has: `hflow manifest`,
+    # `hflow stale --pipeline`, and `hflow serve --pipeline` all arrive here.
+    from hflow import import_pipeline_application
+
+    (tmp_path / "rig_constants.py").write_text("FLEET_NAME = 'kitchen'\n")
+    pipeline_file = tmp_path / "pipeline.py"
+    pipeline_file.write_text(
+        "import hflow\n"
+        "from rig_constants import FLEET_NAME\n\n"
+        "fleet = hflow.App(FLEET_NAME, data_root='./data')\n"
+    )
+    application = import_pipeline_application(f"{pipeline_file}:fleet")
+    assert application.name == "kitchen"
 
 
 def test_up_renders_starts_and_prints(
@@ -1155,3 +1244,78 @@ def test_serve_does_not_turn_a_running_server_crash_into_bad_input(
     monkeypatch.setattr(hflow_server, "serve", crash_once_running)
     with pytest.raises(RuntimeError, match="mid-run"):
         main(["serve", "--data-root", "/tmp", "--no-browser"])
+
+
+def test_an_address_without_a_variable_discovers_the_sole_app(tmp_path: Path) -> None:
+    from hflow import import_pipeline_application
+
+    pipeline_file = tmp_path / "pipeline.py"
+    pipeline_file.write_text("import hflow\n\nkitchen = hflow.App('kitchen', data_root='./data')\n")
+    assert import_pipeline_application(str(pipeline_file)).name == "kitchen"
+
+
+def test_the_conventional_name_still_wins_over_discovery(tmp_path: Path) -> None:
+    # Two Apps is normally ambiguous, but a file that binds `app` has already
+    # said which one it means, and always resolved that way.
+    from hflow import import_pipeline_application
+
+    pipeline_file = tmp_path / "pipeline.py"
+    pipeline_file.write_text(
+        "import hflow\n\n"
+        "staging = hflow.App('staging', data_root='./data')\n"
+        "app = hflow.App('production', data_root='./data')\n"
+    )
+    assert import_pipeline_application(str(pipeline_file)).name == "production"
+
+
+def test_several_apps_refuse_and_name_the_candidates(tmp_path: Path) -> None:
+    from hflow import import_pipeline_application
+
+    pipeline_file = tmp_path / "pipeline.py"
+    pipeline_file.write_text(
+        "import hflow\n\n"
+        "kitchen = hflow.App('kitchen', data_root='./data')\n"
+        "garage = hflow.App('garage', data_root='./data')\n"
+    )
+    with pytest.raises(ValueError, match=r"'kitchen', 'garage'"):
+        import_pipeline_application(str(pipeline_file))
+    # The suggestion in the message has to be an address that works.
+    assert import_pipeline_application(f"{pipeline_file}:garage").name == "garage"
+
+
+def test_a_file_with_no_app_says_so_rather_than_naming_a_missing_variable(
+    tmp_path: Path,
+) -> None:
+    from hflow import import_pipeline_application
+
+    pipeline_file = tmp_path / "pipeline.py"
+    pipeline_file.write_text("value = 42\n")
+    with pytest.raises(ValueError, match=r"defines no hflow\.App"):
+        import_pipeline_application(str(pipeline_file))
+
+
+def test_an_app_imported_from_a_sibling_does_not_create_ambiguity(tmp_path: Path) -> None:
+    # Only names bound in the pipeline file count, so a shared helper module
+    # that builds an App cannot make every pipeline importing it ambiguous.
+    from hflow import import_pipeline_application
+
+    (tmp_path / "shared_rig.py").write_text(
+        "import hflow\n\nshared = hflow.App('shared', data_root='./data')\n"
+    )
+    pipeline_file = tmp_path / "pipeline.py"
+    pipeline_file.write_text(
+        "import hflow\nimport shared_rig  # noqa: F401\n\n"
+        "kitchen = hflow.App('kitchen', data_root='./data')\n"
+    )
+    assert import_pipeline_application(str(pipeline_file)).name == "kitchen"
+
+
+def test_naming_a_missing_variable_is_still_refused(tmp_path: Path) -> None:
+    # Discovery is for addresses that did not say; one that did must not
+    # quietly resolve to something else.
+    from hflow import import_pipeline_application
+
+    pipeline_file = tmp_path / "pipeline.py"
+    pipeline_file.write_text("import hflow\n\nkitchen = hflow.App('kitchen', data_root='./data')\n")
+    with pytest.raises(ValueError, match=r"no hflow\.App named 'garage'"):
+        import_pipeline_application(f"{pipeline_file}:garage")
