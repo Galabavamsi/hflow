@@ -37,7 +37,6 @@ from hflow.manifest import (
     StepKind,
     StepManifest,
 )
-from hflow.mcap_writer import CanonicalMcapWriter
 from hflow.reader import (
     EpisodeReader,
     MessageBatch,
@@ -98,7 +97,6 @@ __all__ = [
     "App",
     "AppendResult",
     "BucketStorageRoot",
-    "CanonicalMcapWriter",
     "Catalog",
     "ChannelData",
     "CheckCoverage",

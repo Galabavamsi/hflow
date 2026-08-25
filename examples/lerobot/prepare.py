@@ -28,7 +28,9 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from hflow.mcap_writer import CanonicalMcapWriter
+from mcap.writer import Writer as McapWriter
+
+import hflow
 
 DEFAULT_REPO = "lerobot/pusht"
 DEFAULT_REVISION = "main"
@@ -651,85 +653,104 @@ def _convert_single_episode(
     state_schema_data = STATE_SCHEMA_TEXT.encode("utf-8")
     action_schema_data = ACTION_SCHEMA_TEXT.encode("utf-8")
 
-    with CanonicalMcapWriter(output_path) as writer:
-        # Register schemas
-        video_schema_id = writer.register_schema(
-            "foxglove.CompressedVideo", "protobuf", schema_data
-        )
-        state_schema_id = writer.register_schema(STATE_SCHEMA_NAME, "ros2msg", state_schema_data)
-        action_schema_id = writer.register_schema(ACTION_SCHEMA_NAME, "ros2msg", action_schema_data)
+    source_uri = f"hf://datasets/{manifest.dataset.repo_id}@{manifest.dataset.revision}"
+    with tempfile.TemporaryDirectory(prefix="lerobot-source-episode-") as temporary_directory:
+        source_episode_path = Path(temporary_directory) / output_path.name
+        with source_episode_path.open("wb") as source_stream:
+            source_writer = McapWriter(source_stream)
+            source_writer.start(profile="", library="hflow LeRobot source adapter")
 
-        # Register channels
-        video_channel_id = writer.register_channel(
-            "/observation.image",
-            "protobuf",
-            video_schema_id,
-            group="cameras",
-        )
-        state_channel_id = writer.register_channel(
-            "/observation.state",
-            "cdr",
-            state_schema_id,
-            group="state",
-        )
-        action_channel_id = writer.register_channel(
-            "/action",
-            "cdr",
-            action_schema_id,
-            group="state",
-        )
+            video_schema_id = source_writer.register_schema(
+                "foxglove.CompressedVideo", "protobuf", schema_data
+            )
+            state_schema_id = source_writer.register_schema(
+                STATE_SCHEMA_NAME, "ros2msg", state_schema_data
+            )
+            action_schema_id = source_writer.register_schema(
+                ACTION_SCHEMA_NAME, "ros2msg", action_schema_data
+            )
 
-        # Write messages
-        for i in range(frame_count):
-            log_time_ns = EPISODE_START_TIME_NS + round(i * NANOSECONDS_PER_SECOND / fps)
+            video_channel_id = source_writer.register_channel(
+                topic="/observation.image",
+                message_encoding="protobuf",
+                schema_id=video_schema_id,
+            )
+            state_channel_id = source_writer.register_channel(
+                topic="/observation.state",
+                message_encoding="cdr",
+                schema_id=state_schema_id,
+            )
+            action_channel_id = source_writer.register_channel(
+                topic="/action",
+                message_encoding="cdr",
+                schema_id=action_schema_id,
+            )
 
-            # Video frame
-            if i < len(access_units):
-                video_msg = CompressedVideo()
-                video_msg.timestamp.seconds = log_time_ns // 1_000_000_000
-                video_msg.timestamp.nanos = log_time_ns % 1_000_000_000
-                video_msg.frame_id = "observation.image"
-                video_msg.data = access_units[i]
-                video_msg.format = "h264"
-                writer.write_message(
-                    video_channel_id,
-                    log_time_ns,
-                    video_msg.SerializeToString(),
+            for frame_index in range(frame_count):
+                log_time_ns = EPISODE_START_TIME_NS + round(
+                    frame_index * NANOSECONDS_PER_SECOND / fps
                 )
 
-            # State (float32[2] CDR)
-            state_data = _encode_cdr_float32_array(states[i])
-            writer.write_message(state_channel_id, log_time_ns, state_data)
+                video_message = CompressedVideo()
+                video_message.timestamp.seconds = log_time_ns // NANOSECONDS_PER_SECOND
+                video_message.timestamp.nanos = log_time_ns % NANOSECONDS_PER_SECOND
+                video_message.frame_id = camera_key
+                video_message.data = access_units[frame_index]
+                video_message.format = "h264"
+                source_writer.add_message(
+                    channel_id=video_channel_id,
+                    log_time=log_time_ns,
+                    data=video_message.SerializeToString(),
+                    publish_time=log_time_ns,
+                    sequence=frame_index,
+                )
 
-            # Action (float32[2] CDR)
-            action_data = _encode_cdr_float32_array(actions[i])
-            writer.write_message(action_channel_id, log_time_ns, action_data)
+                source_writer.add_message(
+                    channel_id=state_channel_id,
+                    log_time=log_time_ns,
+                    data=_encode_cdr_float32_array(states[frame_index]),
+                    publish_time=log_time_ns,
+                    sequence=frame_index,
+                )
+                source_writer.add_message(
+                    channel_id=action_channel_id,
+                    log_time=log_time_ns,
+                    data=_encode_cdr_float32_array(actions[frame_index]),
+                    publish_time=log_time_ns,
+                    sequence=frame_index,
+                )
 
-        # Add episode metadata
-        ffmpeg_version = _get_ffmpeg_version()
-        writer.add_metadata(
-            "episode/v1",
-            {
-                "task": episode.task,
-                "operator": "lerobot_converter",
-                "success": "true",
-                "embodiment": "pusht",
-                "source_dataset": manifest.dataset.repo_id,
-                "source_revision": manifest.dataset.revision,
-                "source_episode_index": str(episode_index),
-                "converter_version": CONVERTER_VERSION,
-            },
-        )
-        writer.add_metadata(
-            "provenance/v1",
-            {
-                "schema_version": "1",
-                "pipeline_version": CONVERTER_VERSION,
-                "ffmpeg_version": ffmpeg_version,
-                "gop_preset": "vla",
-                "gop_seconds": str(PUSHT_GOP_SECONDS),
-                "source_uri": f"hf://datasets/{manifest.dataset.repo_id}@{manifest.dataset.revision}",
-            },
+            source_writer.add_metadata(
+                name="episode/v1",
+                data={
+                    "task": episode.task,
+                    "operator": "lerobot_converter",
+                    "success": "true",
+                    "embodiment": "pusht",
+                    "source_dataset": manifest.dataset.repo_id,
+                    "source_revision": manifest.dataset.revision,
+                    "source_episode_index": str(episode_index),
+                    "converter_version": CONVERTER_VERSION,
+                },
+            )
+            # Canonical provenance describes HFlow's transform. Preserve the
+            # source adapter's encoding instrument separately so both stages
+            # remain honest after canonicalization replaces provenance/v1.
+            source_writer.add_metadata(
+                name="source-provenance/v1",
+                data={
+                    "converter_version": CONVERTER_VERSION,
+                    "ffmpeg_version": _get_ffmpeg_version(),
+                    "source_uri": source_uri,
+                },
+            )
+            source_writer.finish()
+
+        hflow.write_canonical_episode(
+            source_episode_path,
+            output_path,
+            hflow.TransformConfig(gop_seconds=PUSHT_GOP_SECONDS),
+            source_uri=source_uri,
         )
 
     print(f"wrote {output_path} ({output_path.stat().st_size / 1_000_000:.1f} MB)")

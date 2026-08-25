@@ -2,6 +2,10 @@
 
 **Version 1**: a convention for training-ready robot episodes in standard [MCAP](https://mcap.dev/spec).
 
+> **Project maturity:** until HFlow 1.0, canonical episodes are derived artifacts, not the source-of-record. HFlow may
+> change their exact bytes or require regeneration from retained source recordings between
+> releases. Version stamps make those rewrites visible; they are not a promise of byte stability.
+
 A *canonical episode* is one MCAP file, one episode: cameras stored as in-band H.264 video, state streams preserved verbatim, semantics and version stamps carried in-file. It is what the HFlow transform writes and what the rest of the pipeline (checks, catalog, curation) consumes. This page is normative: a third party should be able to implement a conforming writer from it without reading HFlow's code.
 
 Two load-bearing ideas here -- GOP length matched to the read pattern, and topic-group
@@ -16,7 +20,7 @@ The single overriding rule: **a canonical episode is spec-conforming MCAP.** Eve
 
 - MCAP magic, `Header`, data section, `DataEnd`, summary section, `Footer`, closing magic, per the [MCAP spec](https://mcap.dev/spec).
 - `Header.profile` is the empty string `""` (the file mixes protobuf video channels with pass-through channels of arbitrary encoding, so no single profile applies).
-- `Header.library` is informational only (e.g. `hflow episode-format/1 transform-behavior/1`). It deliberately carries no release number: the header is inside the bytes the content episode id hashes, so a release would otherwise give a byte-identical input a new identity. No reader may key behavior off it (see [Identifier rules](#identifier-rules)).
+- `Header.library` is informational only (currently `hflow._grouped_mcap_writer`). Its exact value is not part of the format contract, and no reader may key behavior off it (see [Identifier rules](#identifier-rules)).
 - Chunks are compressed with **zstd** by default (`"none"` is permitted). Each `Chunk` record carries `uncompressed_crc`; the `Footer` carries a summary CRC.
 - The summary section repeats all `Schema` and `Channel` records and contains `Statistics`, all `ChunkIndex` records, `AttachmentIndex`/`MetadataIndex` records, and `SummaryOffset` records. A canonical episode always has a complete summary; unindexed files are not canonical.
 
@@ -38,7 +42,8 @@ layout change at ~3.4× fewer chunk fetches and ~2.9× faster reads at their sca
 | Derived chunk targets | Recorded per group in `provenance/v1` as `chunk-target/<group>`, and only when derived (a pinned target is already in the config) |
 | Camera schemas | `foxglove.CompressedVideo`, `foxglove.CompressedImage`, `foxglove.RawImage`, `foxglove_msgs/msg/CompressedVideo`, `sensor_msgs/msg/CompressedImage`, `sensor_msgs/msg/Image` |
 
-Writer mechanics (how HFlow's `CanonicalMcapWriter` does it; equivalent layouts are conforming as long as the rule above holds):
+Writer mechanics (currently implemented by HFlow's private `hflow._grouped_mcap_writer`
+incubation package; equivalent layouts are conforming as long as the rule above holds):
 
 - One chunk buffer per group. A message routes to its channel's group buffer; when a group's uncompressed buffer exceeds the chunk-size target, that group's chunk is finalized. At `finish()`, every group flushes its remaining buffer.
 - Each `Chunk` record is followed immediately by its `MessageIndex` records (one per channel present in that chunk), and a `ChunkIndex` in the summary points at both. Consequence: the set of channel IDs in any chunk's `message_index_offsets` maps to exactly one group; this is the property conformance checks assert.
@@ -124,7 +129,9 @@ All keys are optional; the record is copied/merged from the source recording. Re
 | `gop_seconds` | The keyframe interval actually used |
 | `source_uri` | Where the source recording came from (optional) |
 
-The corpus is assumed permanently mixed-version: curation pins or excludes exact versions (they are content hashes, so there is no ordering to range over) rather than expecting uniformity. A rewrite of an episode replaces `provenance/v1`; all other source `Metadata` records are copied through unchanged.
+During a rewrite, the derived episode replaces `provenance/v1`; all other source `Metadata`
+records are copied through unchanged. A corpus may be mixed-version while regeneration is in
+progress, so curation pins or excludes exact versions rather than assuming an atomic migration.
 
 ## Attachments
 

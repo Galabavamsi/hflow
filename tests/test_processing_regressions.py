@@ -18,9 +18,9 @@ from mcap.writer import Writer as StockWriter
 from mcap_protobuf.schema import build_file_descriptor_set
 
 import hflow
+from hflow._grouped_mcap_writer import NO_SCHEMA_ID, GroupedMcapWriter
 from hflow.doctor import diagnose
 from hflow.format import METADATA_RECORD_EPISODE
-from hflow.mcap_writer import CanonicalMcapWriter
 from hflow.steps import (
     UNDESCRIBED_CONFIGURATION_KEY,
     compute_check_version,
@@ -192,7 +192,7 @@ def test_transform_accepts_independent_interleaved_passthrough_video_channels(
 def test_aborted_writer_does_not_publish_partial_file(tmp_path: Path) -> None:
     path = tmp_path / "aborted.mcap"
     with pytest.raises(RuntimeError, match="boom"):  # noqa: SIM117
-        with CanonicalMcapWriter(path) as writer:
+        with GroupedMcapWriter(path) as writer:
             schema_id = writer.register_schema("s", "jsonschema", b"{}")
             writer.register_channel("/t", "json", schema_id, group="state")
             raise RuntimeError("boom")
@@ -203,8 +203,8 @@ def test_writer_abort_preserves_previously_published_file(tmp_path: Path) -> Non
     path = tmp_path / "published.mcap"
     path.write_bytes(b"previous valid bytes")
     with pytest.raises(RuntimeError, match="boom"):  # noqa: SIM117
-        with CanonicalMcapWriter(path) as writer:
-            writer.register_channel("/t", "json", 0, group="state")
+        with GroupedMcapWriter(path) as writer:
+            writer.register_channel("/t", "json", NO_SCHEMA_ID, group="state")
             raise RuntimeError("boom")
     assert path.read_bytes() == b"previous valid bytes"
 

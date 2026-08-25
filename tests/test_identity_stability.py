@@ -1,12 +1,10 @@
 """A release must not re-version a corpus that processed nothing differently.
 
 Until the identity epoch in :mod:`hflow.behavior`, ``hflow.__version__`` was
-folded into ``pipeline_version`` (and thence, via ``provenance/v1``, into the
-canonical bytes and so into ``episode_id``), into the MCAP header's library
-string (also inside those bytes), and into any step version whose function
+folded into ``pipeline_version`` and into any step version whose function
 referenced a module. A CLI-only patch release therefore invalidated an entire
-corpus: ``hflow stale`` listed everything, and re-ingesting byte-identical
-sources minted new episode identities instead of deduping.
+corpus: ``hflow stale`` listed everything even though processing behavior had
+not changed.
 
 These tests fail if any of those couplings comes back.
 """
@@ -19,8 +17,6 @@ import numpy
 from mcap.reader import make_reader
 
 import hflow
-from hflow.behavior import TRANSFORM_BEHAVIOR_VERSION
-from hflow.mcap_writer import _default_library_identifier
 from hflow.steps import CheckResult, compute_check_version
 from hflow.testing import SyntheticEpisodeSpec, synthesize_episode
 from hflow.transform import (
@@ -106,16 +102,6 @@ def test_pipeline_version_tracks_the_resample_policy_only_when_derived_channels_
         )
     finally:
         transform_module.RESAMPLE_POLICY_VERSION = original
-
-
-def test_canonical_bytes_carry_no_release_number() -> None:
-    """The MCAP header's library string is inside the hashed bytes."""
-    identifier = _default_library_identifier()
-    assert hflow.__version__ not in identifier
-    assert TRANSFORM_BEHAVIOR_VERSION in identifier
-
-    before, after = _with_faked_release(_default_library_identifier)
-    assert before == after, "a release must not change episode_id"
 
 
 def test_step_referencing_the_hflow_module_survives_a_release() -> None:

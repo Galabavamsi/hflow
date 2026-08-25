@@ -105,4 +105,9 @@ notes and not only here.
 # than a principle. Groups whose rate falls below the floor -- every state
 # group there, every synthetic fixture -- keep their previous layout and
 # re-version only because this constant moved.
-TRANSFORM_BEHAVIOR_VERSION: str = "4"
+#
+# "5": the low-level grouped writer moved behind a private internal boundary
+# and now stamps its own neutral library identifier. Canonical episodes are
+# pre-1.0 derived artifacts, so the old bytes are intentionally not preserved;
+# regenerate them from their source recordings when upgrading.
+TRANSFORM_BEHAVIOR_VERSION: str = "5"

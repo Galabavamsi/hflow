@@ -1,12 +1,9 @@
-"""Canonical MCAP writer: topic-group chunking.
+"""Internal MCAP writer with independently buffered topic groups.
 
-No open-source MCAP writer implements topic-group chunking (the chunk
-layout described in Dyna's article); this one does. Each channel is
-assigned to a named group at registration; each group maintains its own
-chunk buffer and flushes its own chunks, so topics in different groups
-NEVER share a chunk and each group's chunk stream is time-major. Chunking
-changes write order, not the format: output must be spec-conforming MCAP
-readable by the stock ``mcap`` package, Foxglove, and Rerun.
+Each channel is assigned to a named group at registration. Every group
+maintains and flushes its own chunk buffer, so channels in different groups
+never share a chunk. Chunking changes write order, not the format: output is
+spec-conforming MCAP readable by standard MCAP tooling.
 
 Implementation notes (mirrors ``mcap.writer.Writer``, which hardcodes a
 single chunk builder):
@@ -33,9 +30,10 @@ import tempfile
 import zlib
 from collections import OrderedDict, defaultdict
 from collections.abc import Mapping, Sequence
+from enum import StrEnum
 from pathlib import Path
 from types import TracebackType
-from typing import IO, Literal
+from typing import IO, NewType, Self
 
 import zstandard
 from mcap.data_stream import RecordBuilder
@@ -59,27 +57,29 @@ from mcap.records import (
     SummaryOffset,
 )
 
-from hflow.behavior import TRANSFORM_BEHAVIOR_VERSION
-from hflow.format import DEFAULT_CHUNK_SIZE_BYTES, EPISODE_FORMAT_VERSION
-
 MCAP0_MAGIC = struct.pack("<8B", 137, 77, 67, 65, 80, 48, 13, 10)
+DEFAULT_CHUNK_SIZE_BYTES = 1024 * 1024
+DEFAULT_LIBRARY_IDENTIFIER = "hflow._grouped_mcap_writer"
+
+SchemaId = NewType("SchemaId", int)
+ChannelId = NewType("ChannelId", int)
+NO_SCHEMA_ID = SchemaId(0)
 
 
-def _default_library_identifier() -> str:
-    """Project name + episode format version + transform behavior version.
+class CompressionType(StrEnum):
+    """Compression algorithms supported for grouped MCAP chunks."""
 
-    Informational only (MCAP Header ``library`` field): stored-data
-    identifiers stay neutral per ``hflow.format``.
-    """
-    # Deliberately free of the release number: this string is written into
-    # the MCAP header, so it is part of the bytes content_episode_id hashes.
-    # Embedding hflow.__version__ here gave a byte-identical input a new
-    # episode identity on every release, breaking content-addressed dedupe.
-    # The behavior version changes only when canonicalization does.
-    return (
-        f"hflow episode-format/{EPISODE_FORMAT_VERSION} "
-        f"transform-behavior/{TRANSFORM_BEHAVIOR_VERSION}"
-    )
+    ZSTD = "zstd"
+    NONE = "none"
+
+
+class _WriterState(StrEnum):
+    """Mutually exclusive lifecycle states for one writer instance."""
+
+    ACTIVE = "active"
+    FINISHED = "finished"
+    ABORTED = "aborted"
+    FAILED = "failed"
 
 
 class _GroupChunkBuilder:
@@ -133,12 +133,12 @@ class _GroupChunkBuilder:
         self.message_count = 0
 
 
-class CanonicalMcapWriter:
+class GroupedMcapWriter:
     """MCAP writer with per-group chunk streams.
 
     Usage::
 
-        with CanonicalMcapWriter(path) as writer:
+        with GroupedMcapWriter(path) as writer:
             schema_id = writer.register_schema(name, encoding, data)
             channel_id = writer.register_channel(
                 topic, message_encoding, schema_id, group="cameras"
@@ -152,17 +152,36 @@ class CanonicalMcapWriter:
         output: Path | str | IO[bytes],
         *,
         chunk_size: int | Mapping[str, int] = DEFAULT_CHUNK_SIZE_BYTES,
-        compression: Literal["zstd", "none"] = "zstd",
+        default_chunk_size: int = DEFAULT_CHUNK_SIZE_BYTES,
+        compression: CompressionType | str = CompressionType.ZSTD,
         library: str | None = None,
     ) -> None:
-        """``chunk_size`` is one target for every group, or a per-group
-        mapping with :data:`DEFAULT_CHUNK_SIZE_BYTES` for groups it omits.
+        """Configure one chunk target for every group or targets by group name.
 
-        Per-group targets exist because groups are written at wildly different
-        byte rates: six cameras produce megabytes a second while a proprio
-        channel produces kilobytes, and one threshold cannot be right for both
-        (see :func:`hflow.format.derived_chunk_size_bytes`). A plain int stays
-        accepted because it is the public contract callers already pass."""
+        Groups omitted from a mapping use ``default_chunk_size``.
+        """
+        chunk_size_by_group = {} if isinstance(chunk_size, int) else dict(chunk_size)
+        for group_name, group_chunk_size in chunk_size_by_group.items():
+            if group_chunk_size < 1:
+                raise ValueError(
+                    f"chunk size for group {group_name!r} must be >= 1, got {group_chunk_size}"
+                )
+        resolved_default_chunk_size = (
+            chunk_size if isinstance(chunk_size, int) else default_chunk_size
+        )
+        if resolved_default_chunk_size < 1:
+            parameter_name = "chunk_size" if isinstance(chunk_size, int) else "default_chunk_size"
+            raise ValueError(f"{parameter_name} must be >= 1, got {resolved_default_chunk_size}")
+        try:
+            compression_type = CompressionType(compression)
+        except ValueError:
+            valid_compression_types = [
+                supported_compression_type.value for supported_compression_type in CompressionType
+            ]
+            raise ValueError(
+                f"unknown compression {compression!r}; expected one of {valid_compression_types}"
+            ) from None
+
         if isinstance(output, str | Path):
             # Path outputs publish atomically: all bytes go to a sibling temp
             # file, and finish() replaces the destination only after the
@@ -185,19 +204,15 @@ class CanonicalMcapWriter:
             self._stream = output
             self._owns_stream = False
 
-        self._chunk_size_by_group: Mapping[str, int] = (
-            {} if isinstance(chunk_size, int) else dict(chunk_size)
-        )
-        self._default_chunk_size = (
-            chunk_size if isinstance(chunk_size, int) else (DEFAULT_CHUNK_SIZE_BYTES)
-        )
-        self._compression: Literal["zstd", "none"] = compression
-        self._finished = False
+        self._chunk_size_by_group: Mapping[str, int] = chunk_size_by_group
+        self._default_chunk_size = resolved_default_chunk_size
+        self._compression = compression_type
+        self._state = _WriterState.ACTIVE
 
         self._record_builder = RecordBuilder()
-        self._schemas_by_id: OrderedDict[int, Schema] = OrderedDict()
-        self._channels_by_id: OrderedDict[int, Channel] = OrderedDict()
-        self._group_name_by_channel_id: dict[int, str] = {}
+        self._schemas_by_id: OrderedDict[SchemaId, Schema] = OrderedDict()
+        self._channels_by_id: OrderedDict[ChannelId, Channel] = OrderedDict()
+        self._group_name_by_channel_id: dict[ChannelId, str] = {}
         # Insertion order is group-registration order, honored at finish().
         self._chunk_builders_by_group: OrderedDict[str, _GroupChunkBuilder] = OrderedDict()
         self._chunk_indices: list[ChunkIndex] = []
@@ -215,14 +230,14 @@ class CanonicalMcapWriter:
             schema_count=0,
         )
 
-        library_identifier = library if library is not None else _default_library_identifier()
+        library_identifier = library if library is not None else DEFAULT_LIBRARY_IDENTIFIER
         self._stream.write(MCAP0_MAGIC)
         Header(profile="", library=library_identifier).write(self._record_builder)
         self._flush()
 
-    def register_schema(self, name: str, encoding: str, data: bytes) -> int:
-        self._raise_if_finished("register a schema")
-        schema_id = len(self._schemas_by_id) + 1
+    def register_schema(self, name: str, encoding: str, data: bytes) -> SchemaId:
+        self._raise_if_not_active("register a schema")
+        schema_id = SchemaId(len(self._schemas_by_id) + 1)
         schema = Schema(id=schema_id, data=data, encoding=encoding, name=name)
         self._schemas_by_id[schema_id] = schema
         self._statistics.schema_count += 1
@@ -235,19 +250,19 @@ class CanonicalMcapWriter:
         self,
         topic: str,
         message_encoding: str,
-        schema_id: int,
+        schema_id: SchemaId,
         *,
         group: str,
         metadata: dict[str, str] | None = None,
-    ) -> int:
-        self._raise_if_finished("register a channel")
+    ) -> ChannelId:
+        self._raise_if_not_active("register a channel")
         # schema_id 0 is the MCAP spec's "no schema" sentinel.
-        if schema_id != 0 and schema_id not in self._schemas_by_id:
+        if schema_id != NO_SCHEMA_ID and schema_id not in self._schemas_by_id:
             raise ValueError(
                 f"cannot register channel {topic!r}: unknown schema id {schema_id} "
                 f"(registered schema ids: {sorted(self._schemas_by_id)})"
             )
-        channel_id = len(self._channels_by_id) + 1
+        channel_id = ChannelId(len(self._channels_by_id) + 1)
         channel = Channel(
             id=channel_id,
             topic=topic,
@@ -267,13 +282,13 @@ class CanonicalMcapWriter:
 
     def write_message(
         self,
-        channel_id: int,
+        channel_id: ChannelId,
         log_time: int,
         data: bytes,
         publish_time: int | None = None,
         sequence: int = 0,
     ) -> None:
-        self._raise_if_finished("write a message")
+        self._raise_if_not_active("write a message")
         group_name = self._group_name_by_channel_id.get(channel_id)
         if group_name is None:
             raise ValueError(
@@ -303,7 +318,7 @@ class CanonicalMcapWriter:
             self._finalize_group_chunk(group_name)
 
     def add_metadata(self, name: str, data: dict[str, str]) -> None:
-        self._raise_if_finished("add metadata")
+        self._raise_if_not_active("add metadata")
         self._flush()
         offset = self._stream.tell()
         self._statistics.metadata_count += 1
@@ -322,7 +337,7 @@ class CanonicalMcapWriter:
         log_time: int = 0,
         create_time: int = 0,
     ) -> None:
-        self._raise_if_finished("add an attachment")
+        self._raise_if_not_active("add an attachment")
         self._flush()
         offset = self._stream.tell()
         self._statistics.attachment_count += 1
@@ -348,8 +363,9 @@ class CanonicalMcapWriter:
         self._flush()
 
     def finish(self) -> None:
-        if self._finished:
+        if self._state is _WriterState.FINISHED:
             return
+        self._raise_if_not_active("finish")
         try:
             for group_name in self._chunk_builders_by_group:
                 self._finalize_group_chunk(group_name)
@@ -427,10 +443,10 @@ class CanonicalMcapWriter:
                 assert self._output_path is not None
                 self._temporary_output_path.replace(self._output_path)
         except BaseException:
+            self._state = _WriterState.FAILED
             self._discard_temporary_output()
-            self._finished = True
             raise
-        self._finished = True
+        self._state = _WriterState.FINISHED
 
     def _finalize_group_chunk(self, group_name: str) -> None:
         chunk_builder = self._chunk_builders_by_group[group_name]
@@ -440,7 +456,7 @@ class CanonicalMcapWriter:
         self._statistics.chunk_count += 1
 
         chunk_data = chunk_builder.take_chunk_data()
-        if self._compression == "zstd":
+        if self._compression is CompressionType.ZSTD:
             compression_identifier = "zstd"
             compressed_data = zstandard.compress(chunk_data)
         else:
@@ -492,10 +508,12 @@ class CanonicalMcapWriter:
         aborted rewrite never destroys a previously published valid episode.
         Called automatically when an exception escapes the ``with`` block.
         """
-        if self._finished:
-            return
-        self._finished = True
-        self._discard_temporary_output()
+        match self._state:
+            case _WriterState.ACTIVE:
+                self._state = _WriterState.ABORTED
+                self._discard_temporary_output()
+            case _WriterState.FINISHED | _WriterState.ABORTED | _WriterState.FAILED:
+                return
 
     def _discard_temporary_output(self) -> None:
         if not self._owns_stream:
@@ -508,11 +526,11 @@ class CanonicalMcapWriter:
     def _flush(self) -> None:
         self._stream.write(self._record_builder.end())
 
-    def _raise_if_finished(self, operation: str) -> None:
-        if self._finished:
-            raise RuntimeError(f"cannot {operation}: finish() was already called on this writer")
+    def _raise_if_not_active(self, operation: str) -> None:
+        if self._state is not _WriterState.ACTIVE:
+            raise RuntimeError(f"cannot {operation}: writer is {self._state.value}")
 
-    def __enter__(self) -> "CanonicalMcapWriter":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(

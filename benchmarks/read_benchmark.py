@@ -51,8 +51,13 @@ from mcap.reader import make_reader
 from mcap.summary import Summary
 from mcap.writer import Writer as StockWriter
 
+from hflow._grouped_mcap_writer import (
+    NO_SCHEMA_ID,
+    ChannelId,
+    GroupedMcapWriter,
+    SchemaId,
+)
 from hflow.format import DEFAULT_CHUNK_SIZE_BYTES, GopPreset
-from hflow.mcap_writer import CanonicalMcapWriter
 from hflow.testing import SyntheticEpisodeSpec, synthesize_episode
 from hflow.transform import TransformConfig, write_canonical_episode
 
@@ -96,24 +101,24 @@ def _rewrite(
     """
     with source.open("rb") as in_stream, output.open("wb") as out_stream:
         reader = make_reader(in_stream)
-        schema_id_map: dict[int, int] = {}
-        channel_id_map: dict[int, int] = {}
         if group_for_topic is None:
+            stock_schema_id_by_source_id: dict[int, int] = {}
+            stock_channel_id_by_source_id: dict[int, int] = {}
             stock_writer = StockWriter(out_stream, chunk_size=chunk_size_bytes)
             stock_writer.start(profile="", library=library_label)
             for schema, channel, message in reader.iter_messages(log_time_order=True):
-                if schema is not None and schema.id not in schema_id_map:
-                    schema_id_map[schema.id] = stock_writer.register_schema(
+                if schema is not None and schema.id not in stock_schema_id_by_source_id:
+                    stock_schema_id_by_source_id[schema.id] = stock_writer.register_schema(
                         schema.name, schema.encoding, schema.data
                     )
-                if channel.id not in channel_id_map:
-                    channel_id_map[channel.id] = stock_writer.register_channel(
+                if channel.id not in stock_channel_id_by_source_id:
+                    stock_channel_id_by_source_id[channel.id] = stock_writer.register_channel(
                         topic=channel.topic,
                         message_encoding=channel.message_encoding,
-                        schema_id=schema_id_map.get(channel.schema_id, 0),
+                        schema_id=stock_schema_id_by_source_id.get(channel.schema_id, 0),
                     )
                 stock_writer.add_message(
-                    channel_id_map[channel.id],
+                    stock_channel_id_by_source_id[channel.id],
                     log_time=message.log_time,
                     data=message.data,
                     publish_time=message.publish_time,
@@ -121,23 +126,27 @@ def _rewrite(
                 )
             stock_writer.finish()
             return
-        with CanonicalMcapWriter(
+        grouped_schema_id_by_source_id: dict[int, SchemaId] = {}
+        grouped_channel_id_by_source_id: dict[int, ChannelId] = {}
+        with GroupedMcapWriter(
             out_stream, chunk_size=chunk_size_bytes, library=library_label
         ) as grouped_writer:
             for schema, channel, message in reader.iter_messages(log_time_order=True):
-                if schema is not None and schema.id not in schema_id_map:
-                    schema_id_map[schema.id] = grouped_writer.register_schema(
+                if schema is not None and schema.id not in grouped_schema_id_by_source_id:
+                    grouped_schema_id_by_source_id[schema.id] = grouped_writer.register_schema(
                         schema.name, schema.encoding, schema.data
                     )
-                if channel.id not in channel_id_map:
-                    channel_id_map[channel.id] = grouped_writer.register_channel(
+                if channel.id not in grouped_channel_id_by_source_id:
+                    grouped_channel_id_by_source_id[channel.id] = grouped_writer.register_channel(
                         channel.topic,
                         message_encoding=channel.message_encoding,
-                        schema_id=schema_id_map.get(channel.schema_id, 0),
+                        schema_id=grouped_schema_id_by_source_id.get(
+                            channel.schema_id, NO_SCHEMA_ID
+                        ),
                         group=group_for_topic(channel.topic),
                     )
                 grouped_writer.write_message(
-                    channel_id_map[channel.id],
+                    grouped_channel_id_by_source_id[channel.id],
                     log_time=message.log_time,
                     data=message.data,
                     publish_time=message.publish_time,

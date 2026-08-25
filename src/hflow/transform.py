@@ -55,6 +55,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 from hflow import video as video_module
+from hflow._grouped_mcap_writer import (
+    NO_SCHEMA_ID,
+    ChannelId,
+    GroupedMcapWriter,
+    SchemaId,
+)
 from hflow.behavior import TRANSFORM_BEHAVIOR_VERSION
 from hflow.ffmpeg import ffmpeg_version
 from hflow.format import (
@@ -83,7 +89,6 @@ from hflow.format import (
     GopPreset,
     derived_chunk_size_bytes,
 )
-from hflow.mcap_writer import CanonicalMcapWriter
 from hflow.reader import TopicInfo, open_reader
 from hflow.resample import DerivedSeries
 
@@ -651,7 +656,7 @@ def write_canonical_episode(
                 infos=infos,
                 read_window_seconds=READ_WINDOW_SECONDS[transform_config.gop_preset],
             )
-        with CanonicalMcapWriter(
+        with GroupedMcapWriter(
             output_path,
             chunk_size=(
                 resolved_chunk_sizes
@@ -660,11 +665,11 @@ def write_canonical_episode(
             ),
             compression=transform_config.compression,
         ) as writer:
-            video_schema_id: int | None = None
+            video_schema_id: SchemaId | None = None
             # Source channel id (or derived topic) -> output writer channel
             # id. Source registration is ordered by (topic, source channel
             # id), derived registration by topic, for deterministic output.
-            output_channel_ids: dict[int | str, int] = {}
+            output_channel_ids: dict[int | str, ChannelId] = {}
             for source_channel_id in sorted(infos, key=lambda cid: (infos[cid].topic, cid)):
                 info = infos[source_channel_id]
                 if source_channel_id in camera_payloads:
@@ -692,7 +697,7 @@ def write_canonical_episode(
                     else:
                         # Preserve the source's "no schema" sentinel instead of
                         # fabricating an empty Schema record.
-                        schema_id = 0
+                        schema_id = NO_SCHEMA_ID
                     output_channel_ids[source_channel_id] = writer.register_channel(
                         info.topic,
                         message_encoding=info.message_encoding,
@@ -700,7 +705,7 @@ def write_canonical_episode(
                         group=group_for(info),
                     )
 
-            derived_schema_id: int | None = None
+            derived_schema_id: SchemaId | None = None
             for derived_topic, _series, _version in sorted(
                 derived_channels, key=lambda entry: entry[0]
             ):

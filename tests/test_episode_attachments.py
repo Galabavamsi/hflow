@@ -1,7 +1,7 @@
 from pathlib import Path
 
+from hflow._grouped_mcap_writer import GroupedMcapWriter
 from hflow.episode import Episode
-from hflow.mcap_writer import CanonicalMcapWriter
 
 
 def test_episode_attachments_round_trip(tmp_path: Path) -> None:
@@ -10,8 +10,8 @@ def test_episode_attachments_round_trip(tmp_path: Path) -> None:
     attachment_data = b"calibration data"
     media_type = "text/plain"
 
-    # 1. Write it to a temporary MCAP file using CanonicalMcapWriter
-    with CanonicalMcapWriter(mcap_path) as writer:
+    # 1. Write it to a temporary MCAP file using the internal grouped writer
+    with GroupedMcapWriter(mcap_path) as writer:
         writer.add_attachment(
             attachment_name,
             media_type,

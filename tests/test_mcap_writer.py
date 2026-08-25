@@ -18,7 +18,13 @@ from mcap.reader import make_reader
 from mcap.records import Chunk, Message, MessageIndex
 from mcap.stream_reader import StreamReader, breakup_chunk
 
-from hflow.mcap_writer import CanonicalMcapWriter
+from hflow._grouped_mcap_writer import (
+    DEFAULT_CHUNK_SIZE_BYTES,
+    NO_SCHEMA_ID,
+    ChannelId,
+    GroupedMcapWriter,
+    SchemaId,
+)
 
 CAMERA_GROUP = "cameras"
 STATE_GROUP = "state"
@@ -33,7 +39,7 @@ STATE_MESSAGES_PER_TOPIC = 500
 
 @dataclass(frozen=True)
 class ExpectedMessage:
-    channel_id: int
+    channel_id: ChannelId
     topic: str
     log_time: int
     data: bytes
@@ -67,7 +73,7 @@ def _write_two_group_episode(
     Messages are written interleaved in global log-time order; every log_time
     is unique by construction (distinct per-topic offsets modulo the strides).
     """
-    with CanonicalMcapWriter(
+    with GroupedMcapWriter(
         output, chunk_size=TEST_CHUNK_SIZE_BYTES, compression=compression
     ) as writer:
         camera_schema_id = writer.register_schema("camera_schema", "protobuf", b"\x01\x02\x03")
@@ -75,7 +81,7 @@ def _write_two_group_episode(
 
         topic_by_channel_id: dict[int, str] = {}
         group_by_channel_id: dict[int, str] = {}
-        channel_id_by_topic: dict[str, int] = {}
+        channel_id_by_topic: dict[str, ChannelId] = {}
         for topic, schema_id, group in [
             ("/cam/left", camera_schema_id, CAMERA_GROUP),
             ("/cam/right", camera_schema_id, CAMERA_GROUP),
@@ -217,7 +223,7 @@ def test_metadata_and_attachment_round_trip(tmp_path: Path) -> None:
     episode_metadata = {"task": "fold_towel", "operator": "op-7", "success": "true"}
     attachment_data = b'{"camera_matrix": [1, 0, 0]}'
 
-    with CanonicalMcapWriter(mcap_path) as writer:
+    with GroupedMcapWriter(mcap_path) as writer:
         schema_id = writer.register_schema("state_schema", "jsonschema", b"{}")
         channel_id = writer.register_channel("/state/joint", "json", schema_id, group=STATE_GROUP)
         writer.write_message(channel_id, 10, b"\x01")
@@ -277,7 +283,7 @@ def test_compression_none_round_trips(tmp_path: Path) -> None:
 
 def test_zero_message_file_is_readable() -> None:
     stream = BytesIO()
-    with CanonicalMcapWriter(stream) as writer:
+    with GroupedMcapWriter(stream) as writer:
         schema_id = writer.register_schema("state_schema", "jsonschema", b"{}")
         writer.register_channel("/state/joint", "json", schema_id, group=STATE_GROUP)
 
@@ -296,8 +302,10 @@ def test_zero_message_file_is_readable() -> None:
 
 def test_log_time_zero_and_explicit_publish_time_and_sequence() -> None:
     stream = BytesIO()
-    with CanonicalMcapWriter(stream) as writer:
-        channel_id = writer.register_channel("/state/joint", "json", 0, group=STATE_GROUP)
+    with GroupedMcapWriter(stream) as writer:
+        channel_id = writer.register_channel(
+            "/state/joint", "json", NO_SCHEMA_ID, group=STATE_GROUP
+        )
         writer.write_message(channel_id, 0, b"first", publish_time=7, sequence=42)
         writer.write_message(channel_id, 10, b"second")
 
@@ -353,22 +361,46 @@ def test_chunk_index_message_index_offsets_are_valid(tmp_path: Path) -> None:
 
 def test_write_to_unknown_channel_id_raises() -> None:
     with (
-        CanonicalMcapWriter(BytesIO()) as writer,
+        GroupedMcapWriter(BytesIO()) as writer,
         pytest.raises(ValueError, match="unknown channel id 999"),
     ):
-        writer.write_message(999, 0, b"")
+        writer.write_message(ChannelId(999), 0, b"")
 
 
 def test_register_channel_with_unknown_schema_id_raises() -> None:
-    with CanonicalMcapWriter(BytesIO()) as writer:
+    with GroupedMcapWriter(BytesIO()) as writer:
         with pytest.raises(ValueError, match="unknown schema id 42"):
-            writer.register_channel("/topic", "json", 42, group=STATE_GROUP)
+            writer.register_channel("/topic", "json", SchemaId(42), group=STATE_GROUP)
         # schema_id 0 is the MCAP spec's "no schema" sentinel and must be accepted.
-        writer.register_channel("/schemaless", "json", 0, group=STATE_GROUP)
+        writer.register_channel("/schemaless", "json", NO_SCHEMA_ID, group=STATE_GROUP)
+
+
+@pytest.mark.parametrize(
+    ("chunk_size", "error_pattern"),
+    [
+        (0, "chunk_size must be >= 1"),
+        ({STATE_GROUP: 0}, "chunk size for group 'state' must be >= 1"),
+    ],
+)
+def test_nonpositive_chunk_targets_are_rejected(
+    chunk_size: int | dict[str, int], error_pattern: str
+) -> None:
+    with pytest.raises(ValueError, match=error_pattern):
+        GroupedMcapWriter(BytesIO(), chunk_size=chunk_size)
+
+
+def test_nonpositive_mapping_fallback_is_rejected() -> None:
+    with pytest.raises(ValueError, match="default_chunk_size must be >= 1"):
+        GroupedMcapWriter(BytesIO(), chunk_size={}, default_chunk_size=0)
+
+
+def test_unknown_compression_is_rejected() -> None:
+    with pytest.raises(ValueError, match="unknown compression"):
+        GroupedMcapWriter(BytesIO(), compression="brotli")
 
 
 def test_use_after_finish_raises() -> None:
-    writer = CanonicalMcapWriter(BytesIO())
+    writer = GroupedMcapWriter(BytesIO())
     schema_id = writer.register_schema("state_schema", "jsonschema", b"{}")
     channel_id = writer.register_channel("/state/joint", "json", schema_id, group=STATE_GROUP)
     writer.finish()
@@ -386,25 +418,28 @@ def test_use_after_finish_raises() -> None:
         writer.add_attachment("a.bin", "application/octet-stream", b"")
 
 
-def test_default_library_identifier_names_project_and_format() -> None:
+def test_aborted_writer_cannot_be_finished_or_reused() -> None:
+    writer = GroupedMcapWriter(BytesIO())
+    writer.abort()
+    writer.abort()  # Cleanup remains idempotent.
+
+    with pytest.raises(RuntimeError, match="writer is aborted"):
+        writer.finish()
+    with pytest.raises(RuntimeError, match="writer is aborted"):
+        writer.add_metadata("episode/v1", {})
+
+
+def test_failed_finish_cannot_later_appear_successful() -> None:
     stream = BytesIO()
-    with CanonicalMcapWriter(stream):
-        pass
-    stream.seek(0)
-    header = make_reader(stream).get_header()
-    assert header.library.startswith("hflow ")
-    assert "episode-format/1" in header.library
-    # The header is inside the bytes content_episode_id hashes, so it must
-    # carry no release number: see tests/test_identity_stability.py.
-    import hflow
+    writer = GroupedMcapWriter(stream)
+    channel_id = writer.register_channel("/state/joint", "json", NO_SCHEMA_ID, group=STATE_GROUP)
+    writer.write_message(channel_id, 0, b"{}")
+    stream.close()
 
-    assert hflow.__version__ not in header.library
-
-    explicit_stream = BytesIO()
-    with CanonicalMcapWriter(explicit_stream, library="custom-writer/9"):
-        pass
-    explicit_stream.seek(0)
-    assert make_reader(explicit_stream).get_header().library == "custom-writer/9"
+    with pytest.raises(ValueError, match="closed file"):
+        writer.finish()
+    with pytest.raises(RuntimeError, match="writer is failed"):
+        writer.finish()
 
 
 class TestPerGroupChunkTargets:
@@ -442,15 +477,24 @@ class TestPerGroupChunkTargets:
     @staticmethod
     def _write(chunk_size: int | dict[str, int]) -> bytes:
         stream = BytesIO()
-        with CanonicalMcapWriter(stream, chunk_size=chunk_size) as writer:
+        with GroupedMcapWriter(stream, chunk_size=chunk_size) as writer:
             schema_id = writer.register_schema("s", "jsonschema", b"{}")
+            channel_id_by_group: dict[str, ChannelId] = {}
             for topic, group in (("/cam/left", CAMERA_GROUP), ("/state/joint", STATE_GROUP)):
-                writer.register_channel(
+                channel_id_by_group[group] = writer.register_channel(
                     topic, "protobuf", schema_id, group=group, metadata={"group": group}
                 )
             for index in range(200):
-                writer.write_message(1, index * 1000, _camera_payload("/cam/left", index))
-                writer.write_message(2, index * 1000 + 1, _state_payload("/state/joint", index))
+                writer.write_message(
+                    channel_id_by_group[CAMERA_GROUP],
+                    index * 1000,
+                    _camera_payload("/cam/left", index),
+                )
+                writer.write_message(
+                    channel_id_by_group[STATE_GROUP],
+                    index * 1000 + 1,
+                    _state_payload("/state/joint", index),
+                )
         return stream.getvalue()
 
     def test_each_group_is_split_at_its_own_target(self) -> None:
@@ -468,8 +512,6 @@ class TestPerGroupChunkTargets:
     def test_a_group_the_mapping_omits_falls_back_to_the_default(self) -> None:
         """`chunk_size` names the groups it has an opinion about; the rest keep
         DEFAULT_CHUNK_SIZE_BYTES rather than becoming unbounded."""
-        from hflow.mcap_writer import DEFAULT_CHUNK_SIZE_BYTES
-
         omitted = self._chunks_per_group(self._write({CAMERA_GROUP: 32 * 1024}))
         pinned = self._chunks_per_group(self._write(DEFAULT_CHUNK_SIZE_BYTES))
 

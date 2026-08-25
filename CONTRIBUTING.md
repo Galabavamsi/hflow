@@ -146,6 +146,12 @@ once, which is the honest cost; not bumping when behavior changed silently
 mixes two behaviors under one version, which is worse. When in doubt, bump,
 and say so in the pull request.
 
+Before HFlow 1.0, canonical MCAP files are derived artifacts and exact byte
+compatibility is not guaranteed. Retain the raw/source recording and regenerate
+canonical outputs after a behavior bump. The behavior version exists to make
+that rewrite explicit and detectable, not to require adapters for every old
+layout.
+
 Changes to checks, enrichments, or anything a step merely calls do not need a
 bump: a step's own content hash already covers its source and captured
 configuration. `tests/test_identity_stability.py` pins these rules.
@@ -199,8 +205,9 @@ URL, record the new retrieval time, and preserve its license notice in
 - Add or update documentation whenever behavior, flags, formats, or operational
   requirements change.
 - Add outcome-focused regression coverage for bug fixes and business logic.
-- Preserve backward compatibility for stored data unless the change explicitly
-  introduces a new versioned format.
+- Never delete or corrupt raw/source recordings. For pre-1.0 derived outputs,
+  document the behavior bump and regeneration path instead of preserving old
+  byte layouts by default.
 - Verify `git status` does not include recordings, generated artifacts, caches,
   credentials, or runtime bundles.
 

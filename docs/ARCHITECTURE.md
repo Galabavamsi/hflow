@@ -97,15 +97,16 @@ most at scale; HFlow implements both, plus the version stamps the article calls 
    seek per sample → short GOPs), world-model training reads long contiguous sequences (amortizes
    keyframes → long GOPs). HFlow exposes GOP as a writer preset keyed to model class, because --
    as Dyna's article is explicit -- this is effectively a training hyperparameter.
-2. **Topic-group chunking.** MCAP's default writing gives each topic its own chunks, so
-   assembling one training sample costs a read per topic. HFlow's canonical writer instead groups
-   topics that share a read pattern and writes each group time-major: cameras interleaved in one
-   chunk stream, proprioception + actions in another, never sharing a chunk. A sample then costs
-   one read per *group*: an added camera costs no extra fetch. The mechanism comes from
-   Dyna's article, which reports ~3.4× fewer chunk fetches and ~2.9× faster reads; no other
-   open-source MCAP writer implements it. Chunking changes write order, not the format, so **any
-   conforming MCAP reader (Foxglove, Rerun, the stock `mcap` package) reads our files
-   unmodified.**
+2. **Topic-group chunking.** Per-topic layouts make one training sample cost a read per topic,
+   while the stock Python writer's one interleaved chunk stream makes selective state reads fetch
+   unrelated camera bytes. HFlow instead groups topics that share a read pattern and writes each
+   group time-major: cameras interleaved in one chunk stream, proprioception + actions in another,
+   never sharing a chunk. A sample then costs one read per *group*: an added camera costs no extra
+   fetch. The mechanism comes from Dyna's article, which reports ~3.4× fewer chunk fetches and
+   ~2.9× faster reads. The generic mechanism is isolated in the private
+   `hflow._grouped_mcap_writer` subpackage. Chunking changes write order, not the format, so
+   **any conforming MCAP reader
+   (Foxglove, Rerun, the stock `mcap` package) reads our files unmodified.**
 3. **Version stamps.** HFlow stamps every canonical episode with `schema_version`,
    `pipeline_version` (a content hash of the step configuration that produced it), and
    `robot_software_version` (from the source recording's metadata, when present). Dyna's article
@@ -125,6 +126,11 @@ The article leaves several specifics open; these are HFlow's design decisions:
 | Numeric parameters (GOP seconds, chunk sizes) | Configurable, with measured defaults | Not disclosed in Dyna's article; our benchmark report will publish what we measure |
 
 On-disk identifiers (metadata record names, channel naming) are neutral and format-versioned: they never embed the project name, so stored data is independent of branding.
+
+`hflow._grouped_mcap_writer` is an incubation boundary, not a public API or a second distribution.
+It is included in the normal HFlow wheel, so releases remain a single build and publish. If its API
+proves useful independently, it can later move into a workspace package with its own tests and
+version; that package must be published before a HFlow release declares it as a dependency.
 
 **Acceptance test for every file the pipeline writes: it opens cleanly in Foxglove and Rerun.**
 
