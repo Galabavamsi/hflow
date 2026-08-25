@@ -1,4 +1,12 @@
-"""The built-in transform: any input MCAP in, one canonical episode out.
+"""The built-in transform: one MCAP in, one canonical episode out.
+
+Not any MCAP. v1 transcodes JPEG/PNG camera images and passes already-encoded
+H.264 video through unchanged, but only if that video already meets the
+canonical constraints below. A standard ``foxglove.CompressedVideo`` file that
+does not (no access-unit delimiters, say) is refused rather than repaired, and
+raw image channels are refused outright. Both fail loudly and name what is
+wrong; neither is transcoded into shape. Run ``hflow doctor`` on a source file
+to see where it stands before ingesting it.
 
 v1 behavior:
 

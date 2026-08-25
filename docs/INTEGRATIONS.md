@@ -33,6 +33,14 @@ HFlow v1 accepts standard MCAP and writes standard MCAP. The
 camera video, state streams, metadata, and provenance remain together while
 common readers still work unmodified.
 
+Accepting standard MCAP is not the same as accepting every standard MCAP. v1
+transcodes JPEG and PNG camera images, but video already encoded as
+`foxglove.CompressedVideo` has to arrive meeting the canonical video
+constraints, because it passes through byte for byte and the provenance stamp
+asserts it conforms. A file that misses one of them is refused with the reason
+rather than repaired. Run `hflow doctor` against a source file to find out
+before you ingest it.
+
 The convention is not a proprietary file format. Non-camera messages retain
 their original schemas, encodings, payloads, and timestamps. Camera streams
 use the ecosystem-standard `foxglove.CompressedVideo` schema so video stays
