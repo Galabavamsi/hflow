@@ -15,6 +15,11 @@ accessible to anyone. HFlow runs user-owned Python processing code around a
 standard episode format, records provenance and quality evidence, and makes
 corpus metadata queryable without loading the underlying recordings.
 
+Teams can start with the built-in quality checks, write new processing steps, or
+adapt code they already use. Quality control is a common starting point, while the
+same pipeline also supports transformation, enrichment, orchestration, storage,
+versioning, and curation.
+
 For the complete system design, see the
 [architecture](./ARCHITECTURE.md). For a component-by-component view, see
 [how HFlow fits the robotics data stack](./INTEGRATIONS.md).

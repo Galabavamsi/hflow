@@ -23,11 +23,20 @@
 </p>
 
 Hebbian Robotics (YC S26) is building HFlow, an open source SDK for scalable
-multimodal data pipelines in robotics and physical AI. It makes production-grade
-data tooling and practices, typically developed inside large robotics data teams,
-accessible to anyone. Add your existing Python transformations, quality checks,
-labels, and enrichments; HFlow handles the orchestration, storage, versioning,
-and curation around them.
+multimodal data pipelines in robotics and physical AI. It makes data tooling and
+practices typically developed inside large robotics teams accessible to teams of
+any size.
+
+We believe processing data is a major bottleneck in robotics. A corpus can combine
+video, state, actions, timestamps, and metadata from many recording systems. Teams
+often feel the problem first in quality control: determining whether cameras froze,
+streams drifted out of sync, required topics disappeared, or duplicate recordings
+entered the corpus. As the corpus grows, fragmented scripts make it difficult to
+know what ran, audit the results, or reproduce a dataset.
+
+Teams can start with HFlow's built-in checks, write new transformations, checks,
+labels, and enrichments, or connect processing code they already use. HFlow handles
+the orchestration, storage, versioning, and curation around those steps.
 
 HFlow stamps each processed episode with its provenance, renders the pipeline
 as a graph, and records metadata and quality evidence in a queryable catalog.
