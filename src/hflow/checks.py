@@ -831,8 +831,14 @@ def camera_signal_quality(
     a check is the unit of three things at once -- one gate decision, one
     coverage denominator, and one content-hash version. Twenty-odd measurements
     under one name would mean a threshold on any of them gating all of them, and
-    one changed constant re-versioning the lot. Both checks read the same cached
-    remux, so the second costs a decode and no more.
+    one changed constant re-versioning the lot. The instrument is memoized in
+    the workdir (``hflow.ffmpeg.frame_stats`` caches its raw output beside the
+    workdir MP4 it reads, keyed on the filter graph), so registering both
+    checks against the same episode pays one ffmpeg decode per camera per
+    episode, not two. Both checks default the three graph parameters
+    identically, which is what makes them share the decode; override one on
+    only one of the checks and you are back to two decodes, correctly, because
+    you have asked ffmpeg for two different measurements.
 
     The coding range is measured from the pixels, never read from the
     container's declared range. That tag lies in practice -- a corpus can
