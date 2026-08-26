@@ -14,18 +14,20 @@ assignments cannot be distinguished from accidental mixing by reading the
 file alone).
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from mcap.reader import make_reader
+from mcap.records import Channel, Schema
 
 from hflow import video as video_module
 from hflow.format import (
-    CANONICAL_VIDEO_SCHEMA_NAME,
     METADATA_RECORD_EPISODE,
     METADATA_RECORD_PROVENANCE,
+    PASSTHROUGH_VIDEO_SCHEMA_NAMES,
     PROVENANCE_KEY_PIPELINE_VERSION,
     PROVENANCE_KEY_SCHEMA_VERSION,
 )
@@ -105,6 +107,23 @@ def _check_video_payload(
         )
         return
     try:
+        picture_count = video_module.count_h264_pictures(payload)
+    except ValueError as error:
+        collector.add(
+            DiagnosticLevel.ERROR,
+            "video-invalid-slice-header",
+            f"{topic} message {message_index}: {error}",
+        )
+        return
+    if picture_count > 1:
+        collector.add(
+            DiagnosticLevel.ERROR,
+            "video-multiple-access-units",
+            f"{topic} message {message_index}: {picture_count} pictures, "
+            "convention requires exactly one decodable frame per message",
+        )
+        return
+    try:
         access_units = video_module.split_annex_b_stream(payload)
     except ValueError as error:
         collector.add(
@@ -134,6 +153,21 @@ def _check_video_payload(
             "video-stream-starts-mid-gop",
             f"{topic}: first message is not a keyframe; the stream is not decodable from the start",
         )
+
+
+def _resolve_video_decoder(topic: str, channel: Channel, schema: Schema) -> Callable[[bytes], Any]:
+    """Resolve either supported encoded-video payload representation."""
+    from mcap_protobuf.decoder import DecoderFactory as ProtobufDecoderFactory
+    from mcap_ros2.decoder import DecoderFactory as Ros2DecoderFactory
+
+    for factory in (Ros2DecoderFactory(), ProtobufDecoderFactory()):
+        decoder = factory.decoder_for(channel.message_encoding, schema)
+        if decoder is not None:
+            return decoder
+    raise ValueError(
+        f"video topic {topic!r} has message encoding {channel.message_encoding!r} "
+        "that no available decoder handles"
+    )
 
 
 def diagnose(path: Path | str) -> DoctorReport:
@@ -172,7 +206,7 @@ def diagnose(path: Path | str) -> DoctorReport:
         video_channel_ids = {
             channel_id
             for channel_id, schema_name in schema_names_by_channel_id.items()
-            if schema_name == CANONICAL_VIDEO_SCHEMA_NAME
+            if schema_name in PASSTHROUGH_VIDEO_SCHEMA_NAMES
         }
 
         if summary.statistics is None:
@@ -243,7 +277,7 @@ def diagnose(path: Path | str) -> DoctorReport:
         last_log_time_by_channel: dict[int, int] = {}
         video_message_counts: dict[int, int] = {}
         try:
-            from foxglove_schemas_protobuf.CompressedVideo_pb2 import CompressedVideo
+            video_decoders: dict[int, Callable[[bytes], Any]] = {}
 
             for channel_id, log_time, payload in iter_all_messages():
                 previous = last_log_time_by_channel.get(channel_id)
@@ -258,7 +292,17 @@ def diagnose(path: Path | str) -> DoctorReport:
                 if channel_id in video_channel_ids:
                     message_index = video_message_counts.get(channel_id, 0)
                     video_message_counts[channel_id] = message_index + 1
-                    decoded = CompressedVideo.FromString(payload)
+                    decoder = video_decoders.get(channel_id)
+                    if decoder is None:
+                        channel = summary.channels[channel_id]
+                        schema = summary.schemas.get(channel.schema_id)
+                        if schema is None:
+                            raise ValueError(
+                                f"video topic {channel.topic!r} has no readable schema record"
+                            )
+                        decoder = _resolve_video_decoder(channel.topic, channel, schema)
+                        video_decoders[channel_id] = decoder
+                    decoded = decoder(payload)
                     _check_video_payload(
                         collector,
                         topics_by_channel_id[channel_id],
