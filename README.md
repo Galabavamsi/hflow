@@ -104,9 +104,7 @@ the trust model, and the current limits.
 
 ## Community and hosted interest
 
-<!-- Add the Google Form link to the entry below once it is live. -->
-
-- **Hosted version interest:** Google Form coming soon.
+- **Hosted platform waitlist:** [tell us about your workflow](https://forms.gle/EZpQpGGF3eJomx498).
 - **Community Discord:** [join us](https://discord.gg/vacepQvjmg) for questions, feedback, and contribution discussion.
 
 For reproducible bugs and scoped feature requests, use
