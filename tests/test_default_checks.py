@@ -20,19 +20,19 @@ from hflow._video_measurements import (
 from hflow.checks import (
     _DEFAULT_KEY_FACTS,
     DEFAULT_CHECKS,
+    _camera_frame_stats_keys,
     _camera_value,
     _CameraIntermediates,
     _content_digest_value,
+    _episode_duration_keys,
     _episode_duration_value,
+    _keyframe_interval_keys,
     _keyframe_interval_value,
+    _media_digest_keys,
     _media_digest_value,
+    _timestamp_regularity_keys,
     camera_frame_stats,
-    camera_frame_stats_keys,
     episode_duration,
-    episode_duration_keys,
-    keyframe_interval_keys,
-    media_digest_keys,
-    timestamp_regularity_keys,
 )
 from hflow.testing import SyntheticEpisodeSpec, synthesize_episode
 
@@ -698,7 +698,7 @@ def test_a_single_stamp_camera_topic_errors_before_any_measurement(
     from hflow.episode import Episode
 
     topic = Episode(report.canonical_path).cameras[0]
-    assert camera_frame_stats_keys(Episode(report.canonical_path), cameras=[topic]) == {
+    assert _camera_frame_stats_keys(Episode(report.canonical_path), cameras=[topic]) == {
         f"{topic}/message_count",
         f"{topic}/decoded_frame_count",
         f"{topic}/black_frame_pct",
@@ -719,13 +719,13 @@ def test_the_body_emits_what_the_fact_names_even_when_the_fact_withdraws_one(
     withdrawing one named key does not withdraw it from the emitted
     measurements, the body is carrying its own key list again and the
     refactor is void."""
-    real_fact = hflow.checks.camera_frame_stats_keys
+    real_fact = hflow.checks._camera_frame_stats_keys
 
     def poisoned(episode: hflow.Episode, *, cameras: Sequence[str] | None = None) -> set[str]:
         selected = list(cameras) if cameras is not None else episode.cameras
         return real_fact(episode, cameras=cameras) - {f"{selected[0]}/black_frame_pct"}
 
-    monkeypatch.setattr(hflow.checks, "camera_frame_stats_keys", poisoned)
+    monkeypatch.setattr(hflow.checks, "_camera_frame_stats_keys", poisoned)
 
     report = hflow.App("poison", data_root=tmp_path / "data").test(camera_source, verbose=False)
     run = next(r for r in report.checks if r.check.name == "camera_frame_stats")
@@ -755,12 +755,12 @@ def test_a_key_nobody_branches_on_raises_instead_of_appending_null(
     """The dispatcher's explicit failure: match-with-no-branch returning None
     would surface only as a null measurement under record=True (#182). A key
     the fact names and the dispatcher forgot must raise where it happens."""
-    real_fact = hflow.checks.camera_frame_stats_keys
+    real_fact = hflow.checks._camera_frame_stats_keys
 
     def haunted(episode: hflow.Episode, *, cameras: Sequence[str] | None = None) -> set[str]:
         return real_fact(episode, cameras=cameras) | {"ghost/mystery"}
 
-    monkeypatch.setattr(hflow.checks, "camera_frame_stats_keys", haunted)
+    monkeypatch.setattr(hflow.checks, "_camera_frame_stats_keys", haunted)
 
     report = hflow.App("unknown-key", data_root=tmp_path / "data").test(
         camera_source, verbose=False
@@ -938,7 +938,7 @@ def test_episode_duration_keys_fact_and_body_emit_the_same_set(
     from hflow.episode import Episode
 
     canonical = Episode(source_episode)
-    assert episode_duration_keys(canonical) == {
+    assert _episode_duration_keys(canonical) == {
         "duration_s",
         "message_count_total",
         "topic_count",
@@ -951,12 +951,12 @@ def test_episode_duration_withdraws_a_key_when_the_fact_does(
     """Poison: withdrawing ``message_count_total`` from the fact must
     withdraw it from the body's emitted dict, because the body iterates
     the fact's output."""
-    real_fact = episode_duration_keys
+    real_fact = _episode_duration_keys
 
     def poisoned(episode: hflow.Episode) -> set[str]:
         return real_fact(episode) - {"message_count_total"}
 
-    monkeypatch.setattr(hflow.checks, "episode_duration_keys", poisoned)
+    monkeypatch.setattr(hflow.checks, "_episode_duration_keys", poisoned)
     report = hflow.App("duration-poison", data_root=tmp_path / "data").test(
         source_episode, verbose=False
     )
@@ -1067,7 +1067,7 @@ def test_timestamp_regularity_keys_fact_matches_what_the_body_would_write(
     from hflow.episode import Episode
 
     canonical = Episode(source_episode)
-    assert timestamp_regularity_keys(canonical) == set(_timestamp_regularity_emit(canonical))
+    assert _timestamp_regularity_keys(canonical) == set(_timestamp_regularity_emit(canonical))
 
 
 def _timestamp_regularity_emit(episode: hflow.Episode) -> set[str]:
@@ -1093,12 +1093,12 @@ def test_timestamp_regularity_withdraws_a_key_when_the_fact_does(
     """Poison: withdrawing ``median_dt_s`` from the fact must withdraw it
     from the body's emitted dict, because the body iterates the fact's
     output."""
-    real_fact = timestamp_regularity_keys
+    real_fact = _timestamp_regularity_keys
 
     def poisoned(episode: hflow.Episode, *, topics: Sequence[str] | None = None) -> set[str]:
         return {k for k in real_fact(episode, topics=topics) if not k.endswith("/median_dt_s")}
 
-    monkeypatch.setattr(hflow.checks, "timestamp_regularity_keys", poisoned)
+    monkeypatch.setattr(hflow.checks, "_timestamp_regularity_keys", poisoned)
     report = hflow.App("ts-poison", data_root=tmp_path / "data").test(source_episode, verbose=False)
     run = next(r for r in report.checks if r.check.name == "timestamp_regularity")
     assert run.result is not None
@@ -1110,12 +1110,12 @@ def test_timestamp_regularity_raises_on_an_unrecognised_key(
     source_episode: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An unknown topic in the fact's output must raise where it happens."""
-    real_fact = timestamp_regularity_keys
+    real_fact = _timestamp_regularity_keys
 
     def haunted(episode: hflow.Episode, *, topics: Sequence[str] | None = None) -> set[str]:
         return real_fact(episode, topics=topics) | {"/ghost/mystery"}
 
-    monkeypatch.setattr(hflow.checks, "timestamp_regularity_keys", haunted)
+    monkeypatch.setattr(hflow.checks, "_timestamp_regularity_keys", haunted)
     report = hflow.App("ts-haunt", data_root=tmp_path / "data").test(source_episode, verbose=False)
     run = next(r for r in report.checks if r.check.name == "timestamp_regularity")
     assert run.result is None
@@ -1178,12 +1178,12 @@ def test_keyframe_interval_withdraws_a_key_when_the_fact_does(
 ) -> None:
     """Poison: withdrawing ``max_keyframe_gap_s`` from the fact must
     withdraw it from the body's emitted dict."""
-    real_fact = keyframe_interval_keys
+    real_fact = _keyframe_interval_keys
 
     def poisoned(episode: hflow.Episode) -> set[str]:
         return {k for k in real_fact(episode) if not k.endswith("/max_keyframe_gap_s")}
 
-    monkeypatch.setattr(hflow.checks, "keyframe_interval_keys", poisoned)
+    monkeypatch.setattr(hflow.checks, "_keyframe_interval_keys", poisoned)
     report = hflow.App("kf-poison", data_root=tmp_path / "data").test(source_episode, verbose=False)
     run = next(r for r in report.checks if r.check.name == "keyframe_interval")
     assert run.result is not None
@@ -1244,7 +1244,7 @@ def test_content_digest_withdraws_a_key_when_the_fact_does(
 ) -> None:
     """Poison: clearing the fact's single key must leave the body's emitted
     dict empty."""
-    monkeypatch.setattr(hflow.checks, "content_digest_keys", lambda _episode: set())
+    monkeypatch.setattr(hflow.checks, "_content_digest_keys", lambda _episode: set())
     report = hflow.App("cd-poison", data_root=tmp_path / "data").test(source_episode, verbose=False)
     run = next(r for r in report.checks if r.check.name == "content_digest")
     assert run.result is not None
@@ -1317,12 +1317,12 @@ def test_media_digest_withdraws_a_key_when_the_fact_does(
     source = synthesize_episode(
         tmp_path / "md_poison.mcap", SyntheticEpisodeSpec(duration_s=1.0, cameras=("wrist_cam",))
     )
-    real_fact = media_digest_keys
+    real_fact = _media_digest_keys
 
     def poisoned(episode: hflow.Episode, *, cameras: Sequence[str] | None = None) -> set[str]:
         return {k for k in real_fact(episode, cameras=cameras) if not k.endswith("/media_bytes")}
 
-    monkeypatch.setattr(hflow.checks, "media_digest_keys", poisoned)
+    monkeypatch.setattr(hflow.checks, "_media_digest_keys", poisoned)
     report = hflow.App("md-poison", data_root=tmp_path / "data").test(source, verbose=False)
     run = next(r for r in report.checks if r.check.name == "media_digest")
     assert run.result is not None

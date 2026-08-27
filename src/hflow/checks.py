@@ -167,7 +167,9 @@ class _TimestampRegularitySync:
     reference_stamps_ns: np.ndarray | None
 
 
-def timestamp_regularity_keys(episode: Episode, *, topics: Sequence[str] | None = None) -> set[str]:
+def _timestamp_regularity_keys(
+    episode: Episode, *, topics: Sequence[str] | None = None
+) -> set[str]:
     """The one statement of ``timestamp_regularity``'s measurement key set.
 
     Per selected topic: ``period_sample_count`` when the topic has fewer
@@ -287,7 +289,7 @@ def timestamp_regularity(
     periods become labeled gap intervals. Cross-stream: start/end offsets of
     every camera stream against the densest non-camera stream.
 
-    The emitted key set is owned by :func:`timestamp_regularity_keys`: this
+    The emitted key set is owned by :func:`_timestamp_regularity_keys`: this
     body iterates that function's output and routes each key through
     ``_timestamp_regularity_value``, so a key the fact does not name cannot
     be emitted (#182).
@@ -341,7 +343,7 @@ def timestamp_regularity(
     # output (#182).
     measurements: dict[str, MeasurementValue] = {
         key: _timestamp_regularity_value(episode, key, per_topic, sync, tolerance_s)
-        for key in sorted(timestamp_regularity_keys(episode, topics=topics))
+        for key in sorted(_timestamp_regularity_keys(episode, topics=topics))
     }
 
     intervals: list[Interval] = []
@@ -392,7 +394,7 @@ def joint_discontinuity(
     )
 
 
-def camera_frame_stats_keys(episode: Episode, *, cameras: Sequence[str] | None = None) -> set[str]:
+def _camera_frame_stats_keys(episode: Episode, *, cameras: Sequence[str] | None = None) -> set[str]:
     """The one statement of ``camera_frame_stats``' measurement key set.
 
     The check's body iterates this function's output, so a key is emitted
@@ -584,7 +586,7 @@ def camera_frame_stats(
     range, exposure, impulse noise -- live in
     :func:`camera_signal_quality`.
 
-    The emitted key set is owned by :func:`camera_frame_stats_keys`: this
+    The emitted key set is owned by :func:`_camera_frame_stats_keys`: this
     body iterates that function's output and routes each key through
     ``_camera_value``, so a key the fact does not name cannot be emitted.
     The trade is one right-to-left key parse (``rpartition``) plus one dict
@@ -606,7 +608,7 @@ def camera_frame_stats(
     }
     measurements: dict[str, MeasurementValue] = {
         key: _camera_value(key, intermediates_by_topic)
-        for key in sorted(camera_frame_stats_keys(episode, cameras=selected_cameras))
+        for key in sorted(_camera_frame_stats_keys(episode, cameras=selected_cameras))
     }
     intervals: list[Interval] = []
     for topic in selected_cameras:
@@ -749,7 +751,7 @@ def _episode_duration_value(
     raise ValueError(f"episode_duration has no branch for the key {key!r}")
 
 
-def episode_duration_keys(_episode: Episode) -> set[str]:
+def _episode_duration_keys(_episode: Episode) -> set[str]:
     """The one statement of ``episode_duration``'s measurement key set.
 
     Three fixed keys, independent of which topics the episode carries --
@@ -771,7 +773,7 @@ def episode_duration(episode: Episode, *, topics: Sequence[str] | None = None) -
         SELECT episode_id FROM episodes
         WHERE duration_s < 2 OR duration_s > 300
 
-    The emitted key set is owned by :func:`episode_duration_keys`: this body
+    The emitted key set is owned by :func:`_episode_duration_keys`: this body
     iterates that function's output and routes each key through
     ``_episode_duration_value``, so a key the fact does not name cannot be
     emitted (#182).
@@ -779,7 +781,7 @@ def episode_duration(episode: Episode, *, topics: Sequence[str] | None = None) -
     intermediates = _episode_duration_intermediates(episode, topics)
     measurements: dict[str, MeasurementValue] = {
         key: _episode_duration_value(key, intermediates)
-        for key in sorted(episode_duration_keys(episode))
+        for key in sorted(_episode_duration_keys(episode))
     }
     return CheckResult(measurements=measurements)
 
@@ -887,7 +889,7 @@ def _content_digest_intermediates(episode: Episode) -> _ContentDigestIntermediat
     return _ContentDigestIntermediates(digest_hex=digest.hexdigest())
 
 
-def content_digest_keys(_episode: Episode) -> set[str]:
+def _content_digest_keys(_episode: Episode) -> set[str]:
     """The one statement of ``content_digest``'s measurement key set."""
     return {"content_digest"}
 
@@ -918,7 +920,7 @@ def content_digest(episode: Episode) -> CheckResult:
     inter = _content_digest_intermediates(episode)
     return CheckResult(
         measurements={
-            key: _content_digest_value(key, inter) for key in sorted(content_digest_keys(episode))
+            key: _content_digest_value(key, inter) for key in sorted(_content_digest_keys(episode))
         }
     )
 
@@ -1684,7 +1686,7 @@ def _media_digest_intermediates(episode: Episode, topic: str) -> _MediaDigestPer
     return _MediaDigestPerCamera(digest_hex=digest.hexdigest(), total_bytes=total_bytes)
 
 
-def media_digest_keys(episode: Episode, *, cameras: Sequence[str] | None = None) -> set[str]:
+def _media_digest_keys(episode: Episode, *, cameras: Sequence[str] | None = None) -> set[str]:
     """The one statement of ``media_digest``'s measurement key set.
 
     Per selected camera: ``media_digest`` and ``media_bytes`` always --
@@ -1734,7 +1736,7 @@ def media_digest(episode: Episode, *, cameras: Sequence[str] | None = None) -> C
     measurements: dict[str, MeasurementValue] = {}
     for topic in selected_cameras:
         inter = _media_digest_intermediates(episode, topic)
-        for key in sorted(media_digest_keys(episode, cameras=selected_cameras)):
+        for key in sorted(_media_digest_keys(episode, cameras=selected_cameras)):
             if not key.startswith(f"{topic}/"):
                 continue
             name = key[len(topic) + 1 :]
@@ -1775,7 +1777,7 @@ def _keyframe_indices(channel: ChannelData) -> tuple[int, ...]:
     )
 
 
-def keyframe_interval_keys(episode: Episode, *, cameras: Sequence[str] | None = None) -> set[str]:
+def _keyframe_interval_keys(episode: Episode, *, cameras: Sequence[str] | None = None) -> set[str]:
     """The one statement of ``keyframe_interval``'s measurement key set.
 
     Per selected camera: ``scanned_frame_count`` and ``keyframe_count``
@@ -1872,7 +1874,7 @@ def keyframe_interval(episode: Episode, *, cameras: Sequence[str] | None = None)
             frame_count=stamps_ns.size,
             keyframe_indices=_keyframe_indices(channel),
         )
-        for key in sorted(keyframe_interval_keys(episode, cameras=selected_cameras)):
+        for key in sorted(_keyframe_interval_keys(episode, cameras=selected_cameras)):
             if not key.startswith(f"{topic}/"):
                 continue
             name = key[len(topic) + 1 :]
@@ -1939,10 +1941,10 @@ def _default_check_version_for_automatic_registration(check_function: CheckFunct
 # routes to the same statement the body iterates, so prediction and
 # emission are the same function -- no separate mirror, no drift.
 _DEFAULT_KEY_FACTS: dict[CheckFunction, Callable[..., set[str]]] = {
-    episode_duration: episode_duration_keys,
-    timestamp_regularity: timestamp_regularity_keys,
-    camera_frame_stats: camera_frame_stats_keys,
-    keyframe_interval: keyframe_interval_keys,
-    content_digest: content_digest_keys,
-    media_digest: media_digest_keys,
+    episode_duration: _episode_duration_keys,
+    timestamp_regularity: _timestamp_regularity_keys,
+    camera_frame_stats: _camera_frame_stats_keys,
+    keyframe_interval: _keyframe_interval_keys,
+    content_digest: _content_digest_keys,
+    media_digest: _media_digest_keys,
 }
