@@ -869,6 +869,12 @@ class TestReport:
 
     @property
     def quarantined(self) -> bool:
+        """Whether this run carries any quarantine tag.
+
+        A failed critical check adds one. So does a quarantine already
+        recorded in the catalog, when this run skipped the meta stage and
+        read the episode's cataloged state instead.
+        """
         return bool(self.quarantine_tags)
 
     @property
