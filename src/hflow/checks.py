@@ -37,7 +37,7 @@ from hflow._video_measurements import (
     VideoFrameStatistics,
     measure_camera_motion,
 )
-from hflow.episode import Episode
+from hflow.episode import ChannelData, Episode
 from hflow.steps import (
     CheckFunction,
     CheckResult,
@@ -142,6 +142,134 @@ def _mask_run_intervals(
     return intervals
 
 
+@dataclass(frozen=True)
+class _TimestampRegularityPerTopic:
+    """One selected topic's stamps and the rate the dispatcher needs.
+
+    ``sparse`` is True when the topic has fewer than two messages: the
+    body writes only ``period_sample_count`` in that case and the
+    dispatcher must not produce any of the three period keys.
+    """
+
+    stamps_ns: np.ndarray
+    deltas_s: np.ndarray | None
+    expected_period_s: float
+    sparse: bool
+
+
+@dataclass(frozen=True)
+class _TimestampRegularitySync:
+    """The global sync-edge decision: which cameras pair with which
+    state reference, and the reference stamps the offsets need."""
+
+    camera_topics: tuple[str, ...]
+    reference_topic: str | None
+    reference_stamps_ns: np.ndarray | None
+
+
+def timestamp_regularity_keys(episode: Episode, *, topics: Sequence[str] | None = None) -> set[str]:
+    """The one statement of ``timestamp_regularity``'s measurement key set.
+
+    Per selected topic: ``period_sample_count`` when the topic has fewer
+    than two messages, else the three period keys
+    (``median_dt_s``/``period_violation_pct``/``max_gap_s``). Across all
+    selected topics: a pair of ``sync/<cam>~<ref>/{start,end}_offset_s``
+    keys per camera when the episode carries both camera and state
+    streams -- the densest non-camera stream is the reference. ``App``'s
+    pre-decode supersession consults this function through the routing
+    map, which only ever sees the automatic bare registration. The
+    selection rule mirrors the body's exactly: ``topics=`` is taken as
+    given, otherwise every topic with at least two messages (#182).
+    """
+    selected, state_topics = _timestamp_regularity_resolve_selected(episode, topics)
+    keys: set[str] = set()
+    for topic in selected:
+        if episode.channel(topic).timestamps.size < 2:
+            keys.add(f"{topic}/period_sample_count")
+            continue
+        keys.add(f"{topic}/median_dt_s")
+        keys.add(f"{topic}/period_violation_pct")
+        keys.add(f"{topic}/max_gap_s")
+    camera_topics = [topic for topic in episode.cameras if topic in selected]
+    if camera_topics and state_topics:
+        reference = max(state_topics, key=lambda topic: episode.topics[topic].message_count)
+        for camera in camera_topics:
+            keys.add(f"sync/{camera}~{reference}/start_offset_s")
+            keys.add(f"sync/{camera}~{reference}/end_offset_s")
+    return keys
+
+
+def _timestamp_regularity_value(
+    episode: Episode,
+    key: str,
+    per_topic: dict[str, _TimestampRegularityPerTopic],
+    sync: _TimestampRegularitySync,
+    tolerance_s: float,
+) -> MeasurementValue:
+    """The value of one measurement key from the resolved intermediates.
+
+    Raises on any key it does not recognise: an unbranched name means the
+    fact and the dispatcher disagree, and letting ``match`` fall through
+    to ``None`` would surface only as a null measurement under
+    ``record=True`` (#182). ``episode`` is needed for the sync dispatch
+    because the camera stamps are not on the per-topic struct.
+
+    Two key shapes:
+    - ``<topic>/<name>`` -- per-topic period keys
+    - ``sync/<cam>~<ref>/<name>`` -- cross-stream offsets; the rightmost
+      ``/`` divides the name, the rest is the camera~reference pair.
+    """
+    if key.startswith("sync/"):
+        # ``sync/<cam>~<ref>/<start|end>_offset_s``
+        cam_ref, _, name = key[len("sync/") :].rpartition("/")
+        if name not in {"start_offset_s", "end_offset_s"}:
+            raise ValueError(f"timestamp_regularity has no branch for the key {key!r}")
+        if sync.reference_topic is None or sync.reference_stamps_ns is None:
+            raise ValueError(
+                f"timestamp_regularity has no branch for the key {key!r}: "
+                "no sync reference (no state stream paired with a camera)"
+            )
+        cam_topic, sep, ref_in_key = cam_ref.rpartition("~")
+        if not sep:
+            raise ValueError(f"timestamp_regularity has no branch for the key {key!r}")
+        if ref_in_key != sync.reference_topic or cam_topic not in sync.camera_topics:
+            raise ValueError(f"timestamp_regularity has no branch for the key {key!r}")
+        cam_stamps = episode.channel(cam_topic).timestamps
+        ref_stamps = sync.reference_stamps_ns
+        match name:
+            case "start_offset_s":
+                return float((cam_stamps[0] - ref_stamps[0]) / 1e9)
+            case "end_offset_s":
+                return float((cam_stamps[-1] - ref_stamps[-1]) / 1e9)
+        raise ValueError(f"timestamp_regularity has no branch for the key {key!r}")
+    topic, sep, name = key.rpartition("/")
+    if not sep:
+        raise ValueError(f"timestamp_regularity has no branch for the key {key!r}")
+    if topic not in per_topic:
+        raise ValueError(f"timestamp_regularity has no branch for the key {key!r}")
+    inter = per_topic[topic]
+    match name:
+        case "period_sample_count":
+            if not inter.sparse:
+                raise ValueError(f"{key!r}: fact named for a non-sparse topic; per-topic is dense")
+            return inter.stamps_ns.size
+        case "median_dt_s":
+            if inter.sparse or inter.deltas_s is None:
+                raise ValueError(f"{key!r}: fact named for a sparse topic; per-topic is empty")
+            return float(np.median(inter.deltas_s))
+        case "period_violation_pct":
+            if inter.sparse or inter.deltas_s is None:
+                raise ValueError(f"{key!r}: fact named for a sparse topic; per-topic is empty")
+            return float(
+                np.mean(np.abs(inter.deltas_s - inter.expected_period_s) > tolerance_s) * 100.0
+            )
+        case "max_gap_s":
+            if inter.sparse or inter.deltas_s is None:
+                raise ValueError(f"{key!r}: fact named for a sparse topic; per-topic is empty")
+            return float(np.max(inter.deltas_s))
+    raise ValueError(f"timestamp_regularity has no branch for the key {key!r}")
+
+
 def timestamp_regularity(
     episode: Episode,
     *,
@@ -158,29 +286,67 @@ def timestamp_regularity(
     capture needs the looser default here). Deltas beyond ``gap_factor``
     periods become labeled gap intervals. Cross-stream: start/end offsets of
     every camera stream against the densest non-camera stream.
-    """
-    infos = episode.topics
-    selected = (
-        list(topics)
-        if topics is not None
-        else sorted(topic for topic, info in infos.items() if info.message_count >= 2)
-    )
-    measurements: dict[str, MeasurementValue] = {}
-    intervals: list[Interval] = []
 
+    The emitted key set is owned by :func:`timestamp_regularity_keys`: this
+    body iterates that function's output and routes each key through
+    ``_timestamp_regularity_value``, so a key the fact does not name cannot
+    be emitted (#182).
+    """
+    selected, state_topics = _timestamp_regularity_resolve_selected(episode, topics)
+    infos = episode.topics
+
+    per_topic: dict[str, _TimestampRegularityPerTopic] = {}
+    gap_indices_by_topic: dict[str, list[int]] = {}
     for topic in selected:
         stamps_ns = episode.channel(topic).timestamps
         if len(stamps_ns) < 2:
-            measurements[f"{topic}/period_sample_count"] = len(stamps_ns)
+            per_topic[topic] = _TimestampRegularityPerTopic(
+                stamps_ns=stamps_ns, deltas_s=None, expected_period_s=0.0, sparse=True
+            )
             continue
         deltas_s = np.diff(stamps_ns) / 1e9
         declared_hz = (expected_hz or {}).get(topic)
         expected_period_s = 1.0 / declared_hz if declared_hz else float(np.median(deltas_s))
-        violation_mask = np.abs(deltas_s - expected_period_s) > tolerance_s
-        measurements[f"{topic}/median_dt_s"] = float(np.median(deltas_s))
-        measurements[f"{topic}/period_violation_pct"] = float(np.mean(violation_mask) * 100.0)
-        measurements[f"{topic}/max_gap_s"] = float(np.max(deltas_s))
-        gap_indices: list[int] = np.flatnonzero(deltas_s > gap_factor * expected_period_s).tolist()
+        per_topic[topic] = _TimestampRegularityPerTopic(
+            stamps_ns=stamps_ns,
+            deltas_s=deltas_s,
+            expected_period_s=expected_period_s,
+            sparse=False,
+        )
+        gap_indices_by_topic[topic] = np.flatnonzero(
+            deltas_s > gap_factor * expected_period_s
+        ).tolist()
+
+    camera_topics = [topic for topic in episode.cameras if topic in selected]
+    if camera_topics and state_topics:
+        reference = max(state_topics, key=lambda topic: infos[topic].message_count)
+        sync = _TimestampRegularitySync(
+            camera_topics=tuple(camera_topics),
+            reference_topic=reference,
+            reference_stamps_ns=episode.channel(reference).timestamps,
+        )
+    else:
+        sync = _TimestampRegularitySync(
+            camera_topics=tuple(camera_topics),
+            reference_topic=None,
+            reference_stamps_ns=None,
+        )
+
+    # The fact is the single statement of what this default emits; when
+    # the caller passed ``topics=``, the fact runs the same selection
+    # rule and returns the exact key set the body should write. No
+    # post-hoc filter is needed: the fact and the body share selection
+    # and key set, so a key the fact names must have a dispatcher arm
+    # and a key no dispatcher arm handles will not be in the fact's
+    # output (#182).
+    measurements: dict[str, MeasurementValue] = {
+        key: _timestamp_regularity_value(episode, key, per_topic, sync, tolerance_s)
+        for key in sorted(timestamp_regularity_keys(episode, topics=topics))
+    }
+
+    intervals: list[Interval] = []
+    for topic, gap_indices in gap_indices_by_topic.items():
+        stamps_ns = per_topic[topic].stamps_ns
         intervals.extend(
             Interval(
                 start_ns=int(stamps_ns[index]),
@@ -189,25 +355,6 @@ def timestamp_regularity(
             )
             for index in gap_indices
         )
-
-    camera_topics = [topic for topic in episode.cameras if topic in selected]
-    state_topics = [
-        topic
-        for topic in selected
-        if topic not in episode.cameras and infos[topic].message_count >= 2
-    ]
-    if camera_topics and state_topics:
-        reference = max(state_topics, key=lambda topic: infos[topic].message_count)
-        reference_stamps = episode.channel(reference).timestamps
-        for camera in camera_topics:
-            camera_stamps = episode.channel(camera).timestamps
-            measurements[f"sync/{camera}~{reference}/start_offset_s"] = float(
-                (camera_stamps[0] - reference_stamps[0]) / 1e9
-            )
-            measurements[f"sync/{camera}~{reference}/end_offset_s"] = float(
-                (camera_stamps[-1] - reference_stamps[-1]) / 1e9
-            )
-
     return CheckResult(measurements=measurements, intervals=intervals)
 
 
@@ -254,7 +401,7 @@ def camera_frame_stats_keys(episode: Episode, *, cameras: Sequence[str] | None =
     ``episode.cameras`` here exactly as it does in the body, so the fact and
     the body can never disagree about what was selected. ``App``'s
     pre-decode supersession consults this function through
-    ``_DEFAULT_KEY_PATTERNS``, which only ever sees the automatic bare
+    ``_DEFAULT_KEY_FACTS``, which only ever sees the automatic bare
     registration (a configured variant is a different function object and
     takes the post-execution path), so the fact is always called with
     default parameters.
@@ -362,13 +509,19 @@ def _camera_value(
             case "message_count":
                 return inter.stamps_ns.size
             case "expected_frame_count":
-                # The fact names this key only for topics carrying at least
-                # two stamps, which is exactly when intermediates hold a rate.
-                assert inter.expected_frame_count is not None
+                if inter.expected_frame_count is None:
+                    raise ValueError(
+                        f"{key!r} named for a topic that does not carry a rate: the fact "
+                        "only emits it for topics with at least two stamps"
+                    )
                 return inter.expected_frame_count
             case "frame_deficit_pct":
                 expected_frame_count = inter.expected_frame_count
-                assert expected_frame_count is not None
+                if expected_frame_count is None:
+                    raise ValueError(
+                        f"{key!r} named for a topic that does not carry a rate: the fact "
+                        "only emits it for topics with at least two stamps"
+                    )
                 return float(
                     100.0 * (expected_frame_count - inter.stamps_ns.size) / expected_frame_count
                 )
@@ -511,16 +664,45 @@ def idle_fraction(
     )
 
 
-def episode_duration(episode: Episode, *, topics: Sequence[str] | None = None) -> CheckResult:
-    """Episode span and message volume, recorded for curation-side outlier cuts.
+def _timestamp_regularity_resolve_selected(
+    episode: Episode, topics: Sequence[str] | None
+) -> tuple[list[str], list[str]]:
+    """Return ``(selected_topics, candidate_state_topics)``.
 
-    An outlier is a corpus-relative judgment, so it cannot be decided inside
-    a per-episode check without baking a threshold into the corpus; this
-    check records the evidence and the cut is a curation query, e.g.::
-
-        SELECT episode_id FROM episodes
-        WHERE duration_s < 2 OR duration_s > 300
+    The two pieces both the fact and the body walk; the fact only needs
+    the selected list, the body also needs the state topics to pick the
+    densest non-camera reference. Same selection rule, same partition --
+    one statement of "which topics the check ran over".
     """
+    infos = episode.topics
+    selected = (
+        list(topics)
+        if topics is not None
+        else sorted(topic for topic, info in infos.items() if info.message_count >= 2)
+    )
+    state_topics = [
+        topic
+        for topic in selected
+        if topic not in episode.cameras and infos[topic].message_count >= 2
+    ]
+    return selected, state_topics
+
+
+@dataclass(frozen=True)
+class _EpisodeDurationIntermediates:
+    """Everything one ``episode_duration`` key's value reads, computed once."""
+
+    duration_s: float
+    message_count_total: int
+    topic_count: int
+
+
+def _episode_duration_intermediates(
+    episode: Episode,
+    topics: Sequence[str] | None,
+) -> _EpisodeDurationIntermediates:
+    """Verbatim aggregation from the pre-fact body: explicit ``topics``
+    select as given, otherwise every topic carrying at least one message."""
     infos = episode.topics
     selected = (
         list(topics)
@@ -540,13 +722,66 @@ def episode_duration(episode: Episode, *, topics: Sequence[str] | None = None) -
     duration_s = (
         (max(end_candidates_ns) - min(start_candidates_ns)) / 1e9 if start_candidates_ns else 0.0
     )
-    return CheckResult(
-        measurements={
-            "duration_s": duration_s,
-            "message_count_total": message_count_total,
-            "topic_count": len(selected),
-        }
+    return _EpisodeDurationIntermediates(
+        duration_s=duration_s,
+        message_count_total=message_count_total,
+        topic_count=len(selected),
     )
+
+
+def _episode_duration_value(
+    key: str, intermediates: _EpisodeDurationIntermediates
+) -> MeasurementValue:
+    """The value of one measurement key from the aggregated intermediates.
+
+    Raises on any key it does not recognise: an unbranched name means the
+    fact and the dispatcher disagree, and letting ``match`` fall through to
+    ``None`` would surface only as a null measurement under ``record=True``
+    (#182).
+    """
+    match key:
+        case "duration_s":
+            return intermediates.duration_s
+        case "message_count_total":
+            return intermediates.message_count_total
+        case "topic_count":
+            return intermediates.topic_count
+    raise ValueError(f"episode_duration has no branch for the key {key!r}")
+
+
+def episode_duration_keys(_episode: Episode) -> set[str]:
+    """The one statement of ``episode_duration``'s measurement key set.
+
+    Three fixed keys, independent of which topics the episode carries --
+    including of the check's own ``topics=`` selection, which changes only
+    which streams' stamps feed the numbers, never their names (#182).
+    ``App``'s pre-decode supersession consults this function through the
+    routing map, which only ever sees the automatic bare registration.
+    """
+    return {"duration_s", "message_count_total", "topic_count"}
+
+
+def episode_duration(episode: Episode, *, topics: Sequence[str] | None = None) -> CheckResult:
+    """Episode span and message volume, recorded for curation-side outlier cuts.
+
+    An outlier is a corpus-relative judgment, so it cannot be decided inside
+    a per-episode check without baking a threshold into the corpus; this
+    check records the evidence and the cut is a curation query, e.g.::
+
+        SELECT episode_id FROM episodes
+        WHERE duration_s < 2 OR duration_s > 300
+
+    The emitted key set is owned by :func:`episode_duration_keys`: this body
+    iterates that function's output and routes each key through
+    ``_episode_duration_value``, so a key the fact does not name cannot be
+    emitted (#182).
+    """
+    intermediates = _episode_duration_intermediates(episode, topics)
+    measurements: dict[str, MeasurementValue] = {
+        key: _episode_duration_value(key, intermediates)
+        for key in sorted(episode_duration_keys(episode))
+    }
+    return CheckResult(measurements=measurements)
 
 
 def required_topics(episode: Episode, *, topics: Sequence[str]) -> CheckResult:
@@ -624,6 +859,45 @@ def action_rate(episode: Episode, *, topics: Sequence[str]) -> CheckResult:
     return CheckResult(measurements=measurements)
 
 
+@dataclass(frozen=True)
+class _ContentDigestIntermediates:
+    """The single 32-byte SHA-256 state for ``content_digest``.
+
+    Channels are walked in ``(topic, channel_id)`` order so the digest is
+    stable across container layouts, and the body composes the same way
+    the fact's single key advertises.
+    """
+
+    digest_hex: str
+
+
+def _content_digest_intermediates(episode: Episode) -> _ContentDigestIntermediates:
+    digest = hashlib.sha256()
+    ordered_channels = sorted(
+        episode.channels.values(), key=lambda info: (info.topic, info.channel_id)
+    )
+    for info in ordered_channels:
+        channel = episode.channel(info.channel_id)
+        digest.update(info.topic.encode())
+        digest.update(len(channel.raw).to_bytes(8, "big"))
+        for log_time_ns, payload in zip(channel.timestamps, channel.raw, strict=True):
+            digest.update(int(log_time_ns).to_bytes(8, "big", signed=True))
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+    return _ContentDigestIntermediates(digest_hex=digest.hexdigest())
+
+
+def content_digest_keys(_episode: Episode) -> set[str]:
+    """The one statement of ``content_digest``'s measurement key set."""
+    return {"content_digest"}
+
+
+def _content_digest_value(key: str, inter: _ContentDigestIntermediates) -> MeasurementValue:
+    if key == "content_digest":
+        return inter.digest_hex
+    raise ValueError(f"content_digest has no branch for the key {key!r}")
+
+
 def content_digest(episode: Episode) -> CheckResult:
     """A stable digest of the episode's message content, for duplicate hunts.
 
@@ -641,19 +915,12 @@ def content_digest(episode: Episode) -> CheckResult:
     dedupes byte-identical re-ingests on its own; this digest additionally
     catches the same recording landed under different names or provenance.
     """
-    digest = hashlib.sha256()
-    ordered_channels = sorted(
-        episode.channels.values(), key=lambda info: (info.topic, info.channel_id)
+    inter = _content_digest_intermediates(episode)
+    return CheckResult(
+        measurements={
+            key: _content_digest_value(key, inter) for key in sorted(content_digest_keys(episode))
+        }
     )
-    for info in ordered_channels:
-        channel = episode.channel(info.channel_id)
-        digest.update(info.topic.encode())
-        digest.update(len(channel.raw).to_bytes(8, "big"))
-        for log_time_ns, payload in zip(channel.timestamps, channel.raw, strict=True):
-            digest.update(int(log_time_ns).to_bytes(8, "big", signed=True))
-            digest.update(len(payload).to_bytes(8, "big"))
-            digest.update(payload)
-    return CheckResult(measurements={"content_digest": digest.hexdigest()})
 
 
 def camera_stability(
@@ -1393,6 +1660,54 @@ def _payload_starts_a_keyframe(payload: bytes) -> bool:
     return len(access_units) == 1 and access_units[0].is_keyframe
 
 
+@dataclass(frozen=True)
+class _MediaDigestPerCamera:
+    """One camera channel's footage digest and byte count, computed once.
+
+    Reads no pixels and runs no decode; the body just walks the length-
+    framed payload bytes once and the dispatcher hands both numbers out
+    for the two keys the fact advertises.
+    """
+
+    digest_hex: str
+    total_bytes: int
+
+
+def _media_digest_intermediates(episode: Episode, topic: str) -> _MediaDigestPerCamera:
+    payloads = episode.channel(topic).raw
+    digest = hashlib.sha256()
+    total_bytes = 0
+    for payload in payloads:
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+        total_bytes += len(payload)
+    return _MediaDigestPerCamera(digest_hex=digest.hexdigest(), total_bytes=total_bytes)
+
+
+def media_digest_keys(episode: Episode, *, cameras: Sequence[str] | None = None) -> set[str]:
+    """The one statement of ``media_digest``'s measurement key set.
+
+    Per selected camera: ``media_digest`` and ``media_bytes`` always --
+    both are produced in the same byte walk, so the fact's two-key claim
+    holds for every camera the default runs over.
+    """
+    selected_cameras = list(cameras) if cameras is not None else episode.cameras
+    keys: set[str] = set()
+    for topic in selected_cameras:
+        keys.add(f"{topic}/media_digest")
+        keys.add(f"{topic}/media_bytes")
+    return keys
+
+
+def _media_digest_value(topic: str, name: str, inter: _MediaDigestPerCamera) -> MeasurementValue:
+    """Dispatcher for one ``media_digest`` key."""
+    if name == "media_digest":
+        return inter.digest_hex
+    if name == "media_bytes":
+        return inter.total_bytes
+    raise ValueError(f"media_digest has no branch for the key {topic}/{name}")
+
+
 def media_digest(episode: Episode, *, cameras: Sequence[str] | None = None) -> CheckResult:
     """Per-camera digest of the encoded footage alone, for redundancy hunts.
 
@@ -1418,16 +1733,108 @@ def media_digest(episode: Episode, *, cameras: Sequence[str] | None = None) -> C
     selected_cameras = list(cameras) if cameras is not None else episode.cameras
     measurements: dict[str, MeasurementValue] = {}
     for topic in selected_cameras:
-        payloads = episode.channel(topic).raw
-        digest = hashlib.sha256()
-        total_bytes = 0
-        for payload in payloads:
-            digest.update(len(payload).to_bytes(8, "big"))
-            digest.update(payload)
-            total_bytes += len(payload)
-        measurements[f"{topic}/media_digest"] = digest.hexdigest()
-        measurements[f"{topic}/media_bytes"] = total_bytes
+        inter = _media_digest_intermediates(episode, topic)
+        for key in sorted(media_digest_keys(episode, cameras=selected_cameras)):
+            if not key.startswith(f"{topic}/"):
+                continue
+            name = key[len(topic) + 1 :]
+            measurements[key] = _media_digest_value(topic, name, inter)
     return CheckResult(measurements=measurements)
+
+
+@dataclass(frozen=True)
+class _KeyframeIntervalPerCamera:
+    """One camera channel's keyframe walk, computed once.
+
+    The shared scan over ``channel.raw`` is the only fact the
+    ``keyframe_interval`` key set depends on that the body would not
+    already pay for; the body needs the index list to compute the
+    measurements, and the key set needs the count (zero / one / many)
+    to decide whether ``max_keyframe_gap_s`` and
+    ``median_keyframe_interval_s`` apply. ``_keyframe_indices`` runs
+    the scan and is the one source of that count.
+    """
+
+    frame_count: int
+    keyframe_indices: tuple[int, ...]
+
+
+def _keyframe_indices(channel: ChannelData) -> tuple[int, ...]:
+    """Shared payload-scan helper for ``keyframe_interval``: which message
+    indices in ``channel.raw`` are keyframes. The fact and the body call
+    this; the cost is one Annex B scan per camera per call, which is the
+    irreducible price the default pays to know its own key set. Caching
+    the result on the channel would let the pre-decode supersession
+    consult the fact without a second scan, but no caller needs that
+    today -- the body is the only reader, and the fact is only consulted
+    when the default will run anyway. Revisit if a future change makes
+    the pre-decode check the hot path for this default.
+    """
+    return tuple(
+        index for index, payload in enumerate(channel.raw) if _payload_starts_a_keyframe(payload)
+    )
+
+
+def keyframe_interval_keys(episode: Episode, *, cameras: Sequence[str] | None = None) -> set[str]:
+    """The one statement of ``keyframe_interval``'s measurement key set.
+
+    Per selected camera: ``scanned_frame_count`` and ``keyframe_count``
+    and ``first_frame_is_keyframe`` always (when the camera has any
+    frames); ``max_keyframe_gap_s`` once at least one keyframe is
+    found; ``median_keyframe_interval_s`` only when at least two
+    keyframes are found. ``App``'s pre-decode supersession reads this
+    through the routing map, which only ever sees the automatic bare
+    registration.
+    """
+    selected_cameras = list(cameras) if cameras is not None else episode.cameras
+    keys: set[str] = set()
+    for topic in selected_cameras:
+        channel = episode.channel(topic)
+        frame_count = channel.timestamps.size
+        keys.add(f"{topic}/scanned_frame_count")
+        if frame_count == 0:
+            continue
+        keyframe_indices = _keyframe_indices(channel)
+        keys.add(f"{topic}/keyframe_count")
+        keys.add(f"{topic}/first_frame_is_keyframe")
+        if not keyframe_indices:
+            continue
+        keys.add(f"{topic}/max_keyframe_gap_s")
+        if len(keyframe_indices) >= 2:
+            keys.add(f"{topic}/median_keyframe_interval_s")
+    return keys
+
+
+def _keyframe_interval_value(
+    topic: str,
+    name: str,
+    inter: _KeyframeIntervalPerCamera,
+    stamps_ns: np.ndarray,
+) -> MeasurementValue:
+    """Dispatcher for one ``keyframe_interval`` key. The body builds the
+    intermediates struct once per camera and iterates the fact's keys
+    through this, so the key set has one source of truth (#182).
+    """
+    if name == "scanned_frame_count":
+        return inter.frame_count
+    if name == "keyframe_count":
+        return len(inter.keyframe_indices)
+    if name == "first_frame_is_keyframe":
+        return int(bool(inter.keyframe_indices) and inter.keyframe_indices[0] == 0)
+    if name == "max_keyframe_gap_s":
+        if not inter.keyframe_indices:
+            raise ValueError(f"{name!r}: fact named for a keyframe-less camera")
+        keyframe_stamps_ns = stamps_ns[list(inter.keyframe_indices)]
+        gaps_ns = np.diff(np.append(keyframe_stamps_ns, stamps_ns[-1]))
+        positive_gaps_ns = gaps_ns[gaps_ns > 0]
+        return float(np.max(positive_gaps_ns) / 1e9) if len(positive_gaps_ns) else 0.0
+    if name == "median_keyframe_interval_s":
+        if len(inter.keyframe_indices) < 2:
+            raise ValueError(f"{name!r}: fact named for a camera with fewer than two keyframes")
+        keyframe_stamps_ns = stamps_ns[list(inter.keyframe_indices)]
+        intervals_ns = np.diff(keyframe_stamps_ns)
+        return float(np.median(intervals_ns) / 1e9)
+    raise ValueError(f"keyframe_interval has no branch for the key {topic}/{name}")
 
 
 def keyframe_interval(episode: Episode, *, cameras: Sequence[str] | None = None) -> CheckResult:
@@ -1458,33 +1865,18 @@ def keyframe_interval(episode: Episode, *, cameras: Sequence[str] | None = None)
     for topic in selected_cameras:
         channel = episode.channel(topic)
         stamps_ns = channel.timestamps
-        measurements[f"{topic}/scanned_frame_count"] = len(stamps_ns)
-        if len(stamps_ns) == 0:
+        if stamps_ns.size == 0:
+            measurements[f"{topic}/scanned_frame_count"] = 0
             continue
-        keyframe_indices = [
-            index
-            for index, payload in enumerate(channel.raw)
-            if _payload_starts_a_keyframe(payload)
-        ]
-        measurements[f"{topic}/keyframe_count"] = len(keyframe_indices)
-        measurements[f"{topic}/first_frame_is_keyframe"] = int(
-            bool(keyframe_indices) and keyframe_indices[0] == 0
+        inter = _KeyframeIntervalPerCamera(
+            frame_count=stamps_ns.size,
+            keyframe_indices=_keyframe_indices(channel),
         )
-        if not keyframe_indices:
-            continue
-        keyframe_stamps_ns = stamps_ns[keyframe_indices]
-        # The tail matters: a long run after the last keyframe is just as
-        # unseekable as a long run between two.
-        gaps_ns = np.diff(np.append(keyframe_stamps_ns, stamps_ns[-1]))
-        positive_gaps_ns = gaps_ns[gaps_ns > 0]
-        measurements[f"{topic}/max_keyframe_gap_s"] = (
-            float(np.max(positive_gaps_ns) / 1e9) if len(positive_gaps_ns) else 0.0
-        )
-        if len(keyframe_stamps_ns) >= 2:
-            intervals_ns = np.diff(keyframe_stamps_ns)
-            measurements[f"{topic}/median_keyframe_interval_s"] = float(
-                np.median(intervals_ns) / 1e9
-            )
+        for key in sorted(keyframe_interval_keys(episode, cameras=selected_cameras)):
+            if not key.startswith(f"{topic}/"):
+                continue
+            name = key[len(topic) + 1 :]
+            measurements[key] = _keyframe_interval_value(topic, name, inter, stamps_ns)
     return CheckResult(measurements=measurements)
 
 
@@ -1540,128 +1932,17 @@ def _default_check_version_for_automatic_registration(check_function: CheckFunct
         ) from None
 
 
-# Key-set predictor for every default: what ``measurements`` keys would this
-# function emit for a given episode, without actually running it.
-#
-# Used by ``hflow.app.App`` to decide whether a pipeline step has already
-# covered a default's keys, so the default can be short-circuited before the
-# ffmpeg decode it would otherwise pay for. The patterns mirror the
-# ``measurements[...] = ...`` writes in the function bodies above, line for
-# line -- a separate, internal contract that the drift-guard test in
-# ``tests/test_default_checks.py`` enforces: a default whose actual key set
-# diverges from its pattern is a regression in this engine, not in the
-# default itself.
-#
-# The contract is between this registry and the function bodies in this file.
-# It is not a public API: there is no ``keys=`` parameter to
-# ``@app.check(version=...)``,
-# no ``__emitted_keys__`` convention, no way for user code to register a
-# pattern. A user-registered check has no pattern, so a user check that
-# happens to overlap a default's keys falls back to the post-execution
-# comparison in ``_yield_defaults_superseded_by_the_pipeline`` -- the same
-# path the same-parameter wrapper case has always taken.
-def _timestamp_regularity_keys(episode: Episode) -> set[str]:
-    """Mirror of ``timestamp_regularity``: per-topic period/gap keys plus
-    cross-stream sync offsets when both a camera and a state stream exist.
-    """
-    infos = episode.topics
-    selected = sorted(topic for topic, info in infos.items() if info.message_count >= 2)
-    keys: set[str] = set()
-    for topic in selected:
-        if episode.channel(topic).timestamps.size < 2:
-            keys.add(f"{topic}/period_sample_count")
-            continue
-        keys.add(f"{topic}/median_dt_s")
-        keys.add(f"{topic}/period_violation_pct")
-        keys.add(f"{topic}/max_gap_s")
-    camera_topics = [topic for topic in episode.cameras if topic in selected]
-    state_topics = [
-        topic
-        for topic in selected
-        if topic not in episode.cameras and infos[topic].message_count >= 2
-    ]
-    if camera_topics and state_topics:
-        reference = max(state_topics, key=lambda topic: infos[topic].message_count)
-        for camera in camera_topics:
-            keys.add(f"sync/{camera}~{reference}/start_offset_s")
-            keys.add(f"sync/{camera}~{reference}/end_offset_s")
-    return keys
-
-
-def _episode_duration_keys(_episode: Episode) -> set[str]:
-    """Three fixed keys, independent of which topics the episode carries."""
-    return {"duration_s", "message_count_total", "topic_count"}
-
-
-def _content_digest_keys(_episode: Episode) -> set[str]:
-    return {"content_digest"}
-
-
-def _media_digest_keys(episode: Episode) -> set[str]:
-    keys: set[str] = set()
-    for topic in episode.cameras:
-        keys.add(f"{topic}/media_digest")
-        keys.add(f"{topic}/media_bytes")
-    return keys
-
-
-def _keyframe_interval_keys(episode: Episode) -> set[str]:
-    """Mirror of ``keyframe_interval``: per-camera keys, with
-    ``max_keyframe_gap_s`` and ``median_keyframe_interval_s`` conditional on
-    whether the camera carried at least one (or two) keyframes.
-
-    The keyframe walk parses every payload in ``channel.raw``, which is
-    the same work the real check does to count keyframes. The exact
-    key set needs the count -- ``median_keyframe_interval_s`` only
-    appears when the camera has at least two keyframes, and there is
-    no cheaper signal that distinguishes the empty / single / multi
-    cases. The scan is acceptable here because it runs at most once
-    per default that could be superseded (the super-sede path is
-    only entered for ``keyframe_interval`` when a pipeline step has
-    already emitted one of the eight per-topic keys above, and only
-    the four ``*_count`` / ``*_is_keyframe`` / ``*_gap_s`` keys are
-    *new* relative to a no-pipeline-cover run); the saved work is
-    the ffmpeg decode the default would otherwise pay, which is the
-    two-to-five-second step per camera the cache from #175 still
-    has to re-run on a fresh episode. Trade documented here so a
-    future change to ``keyframe_interval`` (e.g. a payload-size
-    short-circuit, a cached keyframe count on the channel) can
-    revisit this prediction.
-    """
-    keys: set[str] = set()
-    for topic in episode.cameras:
-        channel = episode.channel(topic)
-        stamps = channel.timestamps
-        keys.add(f"{topic}/scanned_frame_count")
-        if stamps.size == 0:
-            continue
-        keyframe_indices = [
-            index
-            for index, payload in enumerate(channel.raw)
-            if _payload_starts_a_keyframe(payload)
-        ]
-        keys.add(f"{topic}/keyframe_count")
-        keys.add(f"{topic}/first_frame_is_keyframe")
-        if not keyframe_indices:
-            continue
-        if len(keyframe_indices) >= 2:
-            keys.add(f"{topic}/median_keyframe_interval_s")
-        keys.add(f"{topic}/max_keyframe_gap_s")
-    return keys
-
-
-# Internal: maps a default function to its key-set predictor. ``App`` reads
-# this once at default-skip time. For the five still-mirrored defaults the
-# predictor restates its body's writes, and the drift-guard test in
-# ``tests/test_default_checks.py`` keeps the two in lockstep.
-# ``camera_frame_stats`` maps to its own fact function
-# (:func:`camera_frame_stats_keys`), whose output that body itself iterates --
-# prediction and emission are the same statement there (#182).
-_DEFAULT_KEY_PATTERNS: dict[CheckFunction, Callable[[Episode], set[str]]] = {
-    episode_duration: _episode_duration_keys,
-    timestamp_regularity: _timestamp_regularity_keys,
+# Internal: maps a default function to the fact that owns its key set.
+# ``App`` reads this once at default-skip time to ask the fact "what
+# keys will you emit for this episode?" and use that to decide whether
+# a pipeline step has already covered them (#182). Every default now
+# routes to the same statement the body iterates, so prediction and
+# emission are the same function -- no separate mirror, no drift.
+_DEFAULT_KEY_FACTS: dict[CheckFunction, Callable[..., set[str]]] = {
+    episode_duration: episode_duration_keys,
+    timestamp_regularity: timestamp_regularity_keys,
     camera_frame_stats: camera_frame_stats_keys,
-    keyframe_interval: _keyframe_interval_keys,
-    content_digest: _content_digest_keys,
-    media_digest: _media_digest_keys,
+    keyframe_interval: keyframe_interval_keys,
+    content_digest: content_digest_keys,
+    media_digest: media_digest_keys,
 }
