@@ -34,6 +34,7 @@ class TestParseStorageRoot:
     def test_path_and_plain_string_are_local(self) -> None:
         assert parse_storage_root(Path("/tmp/x")) == LocalStorageRoot(Path("/tmp/x"))
         assert parse_storage_root("./data") == LocalStorageRoot(Path("./data"))
+        assert parse_storage_root(".") == LocalStorageRoot(Path())
 
     def test_existing_roots_pass_through(self) -> None:
         local_root = LocalStorageRoot(Path("/tmp/x"))
@@ -61,6 +62,31 @@ class TestParseStorageRoot:
     def test_bucketless_url_is_refused(self) -> None:
         with pytest.raises(ValueError, match="names no bucket"):
             parse_storage_root("s3://")
+        with pytest.raises(ValueError, match="names no bucket"):
+            parse_storage_root("gs:///x")
+        with pytest.raises(ValueError, match="names no bucket"):
+            parse_storage_root("gs:////x")
+
+    def test_a_file_url_still_builds_a_bucket_root_directly(self) -> None:
+        """The exemption the bucket fixtures stand on.
+
+        ``file://<abs path>`` has an empty authority by construction, so the
+        bucket check has to skip it. Every bucket test simulates its store this
+        way (see this module's docstring and ``tests/conftest.py``); requiring
+        an authority here fails 3 tests and errors 19 more, none of which name
+        the URL as the cause.
+        """
+        assert BucketStorageRoot("file:///tmp/remote").url == "file:///tmp/remote"
+
+    def test_empty_local_path_is_refused(self) -> None:
+        with pytest.raises(
+            ValueError, match=r"storage root .* must be a directory path or bucket URL"
+        ):
+            parse_storage_root("")
+        with pytest.raises(
+            ValueError, match="storage root '   ' must be a directory path or bucket URL"
+        ):
+            parse_storage_root("   ")
 
     def test_is_bucket_url(self) -> None:
         assert is_bucket_url("gs://b/x.mcap")

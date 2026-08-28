@@ -408,7 +408,12 @@ class BucketStorageRoot:
     ) -> None:
         normalized_url = url.rstrip("/")
         _scheme, separator, remainder = normalized_url.partition("://")
-        if not separator or not remainder:
+        # The bucket is the remainder up to the first slash, so gs:///prefix
+        # names none and is refused the same way gs:// is. file:// is exempt
+        # because its authority is empty by construction: the tests simulate a
+        # bucket with file://<abs path> (tests/conftest.py), and requiring an
+        # authority there fails 3 tests and errors 19 more.
+        if not separator or (_scheme.lower() != "file" and not remainder.partition("/")[0]):
             raise ValueError(
                 f"bucket URL {url!r} names no bucket/container -- expected e.g. gs://bucket/prefix"
             )
@@ -631,6 +636,8 @@ def parse_storage_root(value: "str | Path | StorageRoot") -> StorageRoot:
         return LocalStorageRoot(value)
     scheme, separator, remainder = value.partition("://")
     if not separator:
+        if not value.strip():
+            raise ValueError(f"storage root {value!r} must be a directory path or bucket URL")
         return LocalStorageRoot(Path(value))
     normalized_scheme = scheme.lower()
     if normalized_scheme == "file":
