@@ -106,6 +106,7 @@ the trust model, and the current limits.
 
 - **Hosted platform waitlist:** [tell us about your workflow](https://forms.gle/EZpQpGGF3eJomx498).
 - **Community Discord:** [join us](https://discord.gg/vacepQvjmg) for questions, feedback, and contribution discussion.
+- **Code of conduct:** review our [community standards](./CODE_OF_CONDUCT.md) and report concerns privately.
 
 For reproducible bugs and scoped feature requests, use
 [GitHub issues](https://github.com/Hebbian-Robotics/hflow/issues).
