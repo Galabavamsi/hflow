@@ -45,6 +45,27 @@ def my_duration(ep: hflow.Episode) -> hflow.CheckResult:
     return episode_duration(ep)
 """
 
+PIPELINE_WITHOUT_DEFAULT_CHECKS = """
+import hflow
+
+app = hflow.App("planning-demo", default_checks=())
+"""
+
+# Supersedes the check the media planner reads. The auto-registered copy stands
+# down and emits no per-camera keys, so anything that counts a superseded row as
+# an answer reads a camera-bearing episode as camera-less.
+PIPELINE_THAT_SUPERSEDES_CAMERA_FRAME_STATS = """
+import hflow
+from hflow.checks import camera_frame_stats
+
+app = hflow.App("planning-demo")
+
+
+@app.check(version="1")
+def my_camera_frame_stats(ep: hflow.Episode) -> hflow.CheckResult:
+    return camera_frame_stats(ep)
+"""
+
 
 @pytest.fixture(scope="module")
 def source_episode(tmp_path_factory: pytest.TempPathFactory) -> Path:
@@ -412,16 +433,67 @@ class TestMediaPlanning:
         assert _stage(second, hflow.Stage.MEDIA).counts["processed"] == 0
         assert _stage(second, hflow.Stage.MEDIA).skipped_as_current == 1
 
-    def test_a_camera_less_episode_is_planned_every_time(self, project: Path) -> None:
-        """The stated limitation. A camera-less episode records no
-        `media/contact_sheet` row at all, so "no row" cannot be told from
-        "nothing to render" -- and the alternative reading would silently never
-        render a sheet for an episode that wanted one. The stage is a no-op for
-        it, so the cost is one canonical open."""
+    def test_a_camera_bearing_episode_without_a_contact_sheet_is_planned(
+        self, project: Path, camera_source: Path
+    ) -> None:
+        (project / "data" / EPISODE_URI).write_bytes(camera_source.read_bytes())
+        application = hflow.import_pipeline_application(str(project / "pipeline.py"))
+        run_stages_directly(
+            application,
+            [EPISODE_URI],
+            {hflow.Stage.SYNC, hflow.Stage.META},
+        )
+
+        second = _ingest(project)
+
+        assert _stage(second, hflow.Stage.MEDIA).counts["processed"] == 1
+        assert _stage(second, hflow.Stage.MEDIA).skipped_as_current == 0
+
+    def test_a_camera_less_episode_is_not_planned_again(self, project: Path) -> None:
         _ingest(project)
 
         second = _ingest(project)
 
+        assert _stage(second, hflow.Stage.MEDIA).counts["processed"] == 0
+        assert _stage(second, hflow.Stage.MEDIA).skipped_as_current == 1
+
+    def test_disabling_default_checks_keeps_planning_camera_less_media(self, project: Path) -> None:
+        (project / "pipeline.py").write_text(PIPELINE_WITHOUT_DEFAULT_CHECKS)
+        _ingest(project)
+
+        second = _ingest(project)
+
+        assert _stage(second, hflow.Stage.MEDIA).counts["processed"] == 1
+        assert _stage(second, hflow.Stage.MEDIA).skipped_as_current == 0
+
+    def test_a_superseded_camera_check_is_not_an_answer(
+        self, project: Path, camera_source: Path
+    ) -> None:
+        """A superseded row is the reason this reads RAN_STATUSES and not
+        SETTLED_STATUSES. The auto-registered copy stood down, so it emitted no
+        per-camera keys, and counting it would read this camera-bearing episode
+        as camera-less and never render its contact sheet."""
+        (project / "data" / EPISODE_URI).write_bytes(camera_source.read_bytes())
+        (project / "pipeline.py").write_text(PIPELINE_THAT_SUPERSEDES_CAMERA_FRAME_STATS)
+        application = hflow.import_pipeline_application(str(project / "pipeline.py"))
+        run_stages_directly(
+            application,
+            [EPISODE_URI],
+            {hflow.Stage.SYNC, hflow.Stage.META},
+        )
+
+        second = _ingest(project)
+
+        assert _stage(second, hflow.Stage.MEDIA).counts["processed"] == 1
+
+    def test_an_episode_without_camera_frame_stats_is_still_planned(self, project: Path) -> None:
+        (project / "pipeline.py").write_text(PIPELINE_WITHOUT_DEFAULT_CHECKS)
+        _ingest(project)
+        (project / "pipeline.py").write_text(PIPELINE_SOURCE)
+
+        second = _ingest(project)
+
+        assert _stage(second, hflow.Stage.MEDIA).counts["processed"] == 1
         assert _stage(second, hflow.Stage.MEDIA).skipped_as_current == 0
 
 
