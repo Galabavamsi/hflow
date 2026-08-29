@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -19,6 +21,8 @@ from examples.build_ai_evaluation.evaluate import (
     summarize_results,
 )
 from examples.build_ai_evaluation.judgment import (
+    ACTIVE_MANIPULATION_RESPONSE_SCHEMA,
+    HAND_COUNT_RESPONSE_SCHEMA,
     EvaluationTask,
     ResponseFormat,
     TaskDefinition,
@@ -50,6 +54,53 @@ class _FixtureCompletions:
 class _FixtureOpenAICompatibleClient:
     def __init__(self, response_text: str) -> None:
         self.chat = SimpleNamespace(completions=_FixtureCompletions(response_text))
+
+
+_TASK_VALUE_CONTRACTS: dict[
+    EvaluationTask,
+    tuple[dict[str, object], str, Callable[[str], int | str], tuple[object, ...]],
+] = {
+    EvaluationTask.HAND_COUNT: (
+        HAND_COUNT_RESPONSE_SCHEMA,
+        "hand_count",
+        parse_hand_count_response,
+        (-1, 3),
+    ),
+    EvaluationTask.ACTIVE_MANIPULATION: (
+        ACTIVE_MANIPULATION_RESPONSE_SCHEMA,
+        "answer",
+        parse_active_manipulation_response,
+        ("maybe", ""),
+    ),
+}
+
+
+def test_task_schema_value_sets_match_their_parsers() -> None:
+    """Each task's schema must state the value set its parser enforces.
+
+    Both tasks answer from a closed set, so the schema can say so and a
+    provider doing constrained decoding will not emit anything else. When only
+    the parser knows, an out-of-set answer costs a request and lands as an
+    unparsed episode with no prediction (#257).
+    """
+    executable_tasks = set(EvaluationTask) - {EvaluationTask.BOTH}
+    assert set(_TASK_VALUE_CONTRACTS) == executable_tasks
+
+    for task, (schema, property_name, parser, rejected_values) in _TASK_VALUE_CONTRACTS.items():
+        properties = cast(dict[str, dict[str, object]], schema["properties"])
+        property_schema = properties[property_name]
+        assert "enum" in property_schema, (
+            f"{task.value}: {property_name!r} has no 'enum', so its schema does not state the "
+            "value set its parser enforces and the model is free to answer outside it"
+        )
+        permitted_values = cast(list[object], property_schema["enum"])
+        for value in permitted_values:
+            assert parser(json.dumps({property_name: value})) == value, (
+                f"{task.value}: the schema permits {value!r} but the parser does not accept it"
+            )
+        for value in rejected_values:
+            with pytest.raises(ValueError):
+                parser(json.dumps({property_name: value}))
 
 
 @pytest.mark.parametrize(
