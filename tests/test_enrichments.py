@@ -10,6 +10,7 @@ import hflow
 from hflow.app import MEDIA_CONTACT_SHEET_STEP_NAME
 from hflow.curation import open_catalog_connection
 from hflow.testing import SyntheticEpisodeSpec, synthesize_episode
+from hflow.transform import write_canonical_episode
 
 FAST_SPEC = SyntheticEpisodeSpec(duration_s=2.0, cameras=())
 
@@ -238,3 +239,39 @@ def test_labels_near_the_artifact_namespace_still_land_with_real_artifacts(
         assert str(artifact_row[0]).endswith("segments.json")
     finally:
         connection.close()
+
+
+_EGOCENTRIC_PIPELINE = Path(__file__).resolve().parents[1] / "examples/egocentric/pipeline.py"
+
+
+def test_the_egocentric_example_renders_a_sheet_on_a_multi_camera_episode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The example itself, not a copy of its shape.
+
+    A test that defines its own enrichment calling
+    ``frames(camera=..., fps=1.0)`` passes whether or not the example does the
+    same, so it cannot catch a regression in the file it ships alongside. This
+    loads the real pipeline: reverting the fix in
+    ``examples/egocentric/pipeline.py`` turns ``contact_sheet`` into an ERROR
+    here.
+
+    The example resolves DATA_ROOT relative to the working directory, so the
+    chdir keeps its artifacts inside tmp_path.
+    """
+    monkeypatch.chdir(tmp_path)
+    raw = synthesize_episode(
+        tmp_path / "raw.mcap",
+        SyntheticEpisodeSpec(duration_s=2.0, cameras=("wrist_cam", "top_cam")),
+    )
+    canonical = tmp_path / "canonical.mcap"
+    write_canonical_episode(raw, canonical)
+
+    application = hflow.import_pipeline_application(str(_EGOCENTRIC_PIPELINE))
+    report = application.test(canonical, verbose=False)
+
+    sheet_run = next(run for run in report.enrichments if run.enrichment.name == "contact_sheet")
+    assert sheet_run.status is hflow.CheckStatus.MEASURED, sheet_run.error
+    assert sheet_run.result is not None
+    # The episode has two cameras and the sheet names the one it rendered.
+    assert sheet_run.result.labels["contact_sheet_camera"] == "/top_cam/compressed"
