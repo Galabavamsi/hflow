@@ -231,6 +231,11 @@ def diagnose(path: Path | str) -> DoctorReport:
                 "no-chunk-indexes",
                 "no ChunkIndex records: the file is unchunked or unindexed",
             )
+        # Item 3's second half: within one group the chunks must ascend by
+        # start time. Groups interleave freely, so this tracks each separately.
+        last_chunk_start_by_group: dict[str, int] = {}
+        out_of_order_groups: set[str] = set()
+
         for chunk_number, chunk_index in enumerate(summary.chunk_indexes):
             chunk_channel_ids = set(chunk_index.message_index_offsets.keys())
             if not chunk_channel_ids:
@@ -247,6 +252,14 @@ def diagnose(path: Path | str) -> DoctorReport:
                     topic = topics_by_channel_id[channel_id]
                     if topic in group_by_topic:
                         chunk_groups.add(group_by_topic[topic])
+
+                for group in chunk_groups:
+                    if (
+                        group in last_chunk_start_by_group
+                        and chunk_index.message_start_time < last_chunk_start_by_group[group]
+                    ):
+                        out_of_order_groups.add(group)
+                    last_chunk_start_by_group[group] = chunk_index.message_start_time
 
                 if len(chunk_groups) > 1:
                     mixed_topics = sorted(
@@ -275,6 +288,13 @@ def diagnose(path: Path | str) -> DoctorReport:
                         f"chunk {chunk_number} mixes video and state channels {mixed_topics}; "
                         "the default convention separates them",
                     )
+
+        for group in sorted(out_of_order_groups):
+            collector.add(
+                DiagnosticLevel.WARNING,
+                "group-chunks-out-of-order",
+                f"chunks for group {group!r} are not time-ordered",
+            )
 
         if provenance is None:
             collector.add(
