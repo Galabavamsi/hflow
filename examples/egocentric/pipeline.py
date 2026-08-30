@@ -33,11 +33,11 @@ def timestamp_regularity(episode: hflow.Episode) -> hflow.CheckResult:
 @app.check(version="1", critical=True)
 def camera_health(episode: hflow.Episode) -> hflow.CheckResult:
     camera_topic = episode.cameras[0]
-    evidence = measure_camera_frame_stats(episode, cameras=[camera_topic])
-    black_frame_percent = evidence.measurements[f"{camera_topic}/black_frame_pct"]
-    freeze_total_seconds = evidence.measurements[f"{camera_topic}/freeze_total_s"]
-    average_luma_mean = evidence.measurements[f"{camera_topic}/luma_avg_mean"]
-    decoded_frame_count = evidence.measurements[f"{camera_topic}/decoded_frame_count"]
+    camera_evidence = measure_camera_frame_stats(episode, cameras=[camera_topic])
+    black_frame_percent = camera_evidence.measurements[f"{camera_topic}/black_frame_pct"]
+    freeze_total_seconds = camera_evidence.measurements[f"{camera_topic}/freeze_total_s"]
+    average_luma_mean = camera_evidence.measurements[f"{camera_topic}/luma_avg_mean"]
+    decoded_frame_count = camera_evidence.measurements[f"{camera_topic}/decoded_frame_count"]
     assert isinstance(black_frame_percent, float)
     assert isinstance(freeze_total_seconds, float)
     return hflow.CheckResult(
@@ -53,7 +53,7 @@ def camera_health(episode: hflow.Episode) -> hflow.CheckResult:
                 end_ns=interval.end_ns,
                 label="camera_freeze",
             )
-            for interval in evidence.intervals
+            for interval in camera_evidence.intervals
         ],
         verdict=black_frame_percent < 5.0 and freeze_total_seconds < 2.0,
     )
