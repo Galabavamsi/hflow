@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, assert_never
 
 import hflow
 
@@ -41,14 +41,32 @@ class TaskDefinition:
 
 
 @dataclass(frozen=True)
-class VisionCheckOutcome:
-    """One model response expressed on HFlow's check-result boundary."""
+class ModelResponseMetadata:
+    """The provider response fields retained across evaluation adapters."""
 
-    check_result: hflow.CheckResult
+    response_model: str | None
+    usage: dict[str, object]
+
+
+@dataclass(frozen=True)
+class ParsedVisionModelOutcome:
+    """A model response successfully parsed into the task's result vocabulary."""
+
     raw_response: str
-    response_metadata: dict[str, object]
-    predicted_value: int | str | None
-    parse_error: str | None = None
+    response_metadata: ModelResponseMetadata
+    predicted_value: int | str
+
+
+@dataclass(frozen=True)
+class UnparsedVisionModelOutcome:
+    """A completed model response outside the task's result vocabulary."""
+
+    raw_response: str
+    response_metadata: ModelResponseMetadata
+    parse_error: str
+
+
+VisionModelOutcome = ParsedVisionModelOutcome | UnparsedVisionModelOutcome
 
 
 HAND_COUNT_RESPONSE_SCHEMA: dict[str, object] = {
@@ -195,17 +213,19 @@ def _chat_completion_response_text(response: object) -> str:
     raise ValueError("endpoint returned no text completion content")
 
 
-def _response_metadata(response: object) -> dict[str, object]:
-    response_metadata: dict[str, object] = {}
+def _response_metadata(response: object) -> ModelResponseMetadata:
     response_model = getattr(response, "model", None)
-    if isinstance(response_model, str):
-        response_metadata["response_model"] = response_model
+    parsed_response_model = response_model if isinstance(response_model, str) else None
+    parsed_usage: dict[str, object] = {}
     usage = getattr(response, "usage", None)
     if usage is not None and callable(getattr(usage, "model_dump", None)):
         dumped_usage = usage.model_dump(exclude_none=True)
         if isinstance(dumped_usage, dict):
-            response_metadata["usage"] = dumped_usage
-    return response_metadata
+            parsed_usage = dumped_usage
+    return ModelResponseMetadata(
+        response_model=parsed_response_model,
+        usage=parsed_usage,
+    )
 
 
 def _task_measurement_prefix(task: EvaluationTask) -> str:
@@ -214,34 +234,62 @@ def _task_measurement_prefix(task: EvaluationTask) -> str:
     return f"build_ai/{task.value.replace('-', '_')}"
 
 
-def _hflow_check_result(
+def model_output_check_result(
     *,
     task: EvaluationTask,
     requested_model: str,
-    raw_response: str,
-    response_metadata: dict[str, object],
-    predicted_value: int | str | None,
-    parse_error: str | None = None,
+    outcome: VisionModelOutcome,
+    observation_id: str,
+    timestamp_ns: int,
 ) -> hflow.CheckResult:
+    """Adapt one parsed model outcome to HFlow's complete evidence boundary."""
     measurement_prefix = _task_measurement_prefix(task)
     measurements: dict[str, hflow.MeasurementValue] = {
-        f"{measurement_prefix}/raw_response": raw_response,
+        f"{measurement_prefix}/raw_response": outcome.raw_response,
         f"{measurement_prefix}/requested_model": requested_model,
     }
-    if predicted_value is not None:
-        measurements[f"{measurement_prefix}/prediction"] = predicted_value
-    response_model = response_metadata.get("response_model")
-    if isinstance(response_model, str):
-        measurements[f"{measurement_prefix}/response_model"] = response_model
-    usage = response_metadata.get("usage")
-    if isinstance(usage, dict):
-        for usage_name, usage_value in usage.items():
-            if isinstance(usage_value, int | float) and not isinstance(usage_value, bool):
-                measurements[f"{measurement_prefix}/usage/{usage_name}"] = usage_value
-    tags = [f"{measurement_prefix}/unparsed"] if parse_error is not None else []
-    if parse_error is not None:
-        measurements[f"{measurement_prefix}/parse_error"] = parse_error
-    return hflow.CheckResult(measurements=measurements, tags=tags)
+    if outcome.response_metadata.response_model is not None:
+        measurements[f"{measurement_prefix}/response_model"] = (
+            outcome.response_metadata.response_model
+        )
+    for usage_name, usage_value in outcome.response_metadata.usage.items():
+        if isinstance(usage_value, int | float) and not isinstance(usage_value, bool):
+            measurements[f"{measurement_prefix}/usage/{usage_name}"] = usage_value
+
+    observation_values: dict[str, hflow.MeasurementValue] = {
+        "task": task.value,
+        "raw_response": outcome.raw_response,
+        "requested_model": requested_model,
+    }
+    if outcome.response_metadata.response_model is not None:
+        observation_values["response_model"] = outcome.response_metadata.response_model
+    for usage_name, usage_value in outcome.response_metadata.usage.items():
+        if isinstance(usage_value, int | float | str | bool):
+            observation_values[f"usage/{usage_name}"] = usage_value
+    match outcome:
+        case ParsedVisionModelOutcome(predicted_value=predicted_value):
+            measurements[f"{measurement_prefix}/prediction"] = predicted_value
+            observation_values["valid"] = True
+            observation_values["prediction"] = predicted_value
+            tags: list[str] = []
+        case UnparsedVisionModelOutcome(parse_error=parse_error):
+            measurements[f"{measurement_prefix}/parse_error"] = parse_error
+            observation_values["valid"] = False
+            observation_values["parse_error"] = parse_error
+            tags = [f"{measurement_prefix}/unparsed"]
+        case unexpected_outcome:
+            assert_never(unexpected_outcome)
+    return hflow.CheckResult(
+        measurements=measurements,
+        observations=[
+            hflow.Observation(
+                observation_id=observation_id,
+                timestamp_ns=timestamp_ns,
+                values=observation_values,
+            )
+        ],
+        tags=tags,
+    )
 
 
 def evaluate_image_with_model(
@@ -253,8 +301,8 @@ def evaluate_image_with_model(
     response_format: ResponseFormat,
     temperature: float | None,
     max_tokens: int,
-) -> VisionCheckOutcome:
-    """Run one Build AI image judgment and return its HFlow check result."""
+) -> VisionModelOutcome:
+    """Run one Build AI image judgment and return its parsed domain outcome."""
     request_parameters: dict[str, object] = {
         "model": model,
         "messages": [
@@ -281,28 +329,12 @@ def evaluate_image_with_model(
         predicted_value = parse_task_response(task_definition.task, raw_response)
     except ValueError as error:
         parse_error = str(error)
-        return VisionCheckOutcome(
-            check_result=_hflow_check_result(
-                task=task_definition.task,
-                requested_model=model,
-                raw_response=raw_response,
-                response_metadata=response_metadata,
-                predicted_value=None,
-                parse_error=parse_error,
-            ),
+        return UnparsedVisionModelOutcome(
             raw_response=raw_response,
             response_metadata=response_metadata,
-            predicted_value=None,
             parse_error=parse_error,
         )
-    return VisionCheckOutcome(
-        check_result=_hflow_check_result(
-            task=task_definition.task,
-            requested_model=model,
-            raw_response=raw_response,
-            response_metadata=response_metadata,
-            predicted_value=predicted_value,
-        ),
+    return ParsedVisionModelOutcome(
         raw_response=raw_response,
         response_metadata=response_metadata,
         predicted_value=predicted_value,

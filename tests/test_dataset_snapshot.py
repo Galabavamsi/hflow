@@ -47,6 +47,13 @@ def _append_snapshot_episode(
                 status=hflow.CheckStatus.MEASURED,
                 duration_s=0.1,
                 measurements={"quality/score": score, "caption": f"sample {name}"},
+                observations=[
+                    hflow.Observation(
+                        observation_id="frame:1",
+                        timestamp_ns=10,
+                        values={"score": score, "reviewed": True},
+                    )
+                ],
                 tags=["needs-inspection"],
                 intervals=[hflow.Interval(start_ns=10, end_ns=20, label="inspect")],
             ),
@@ -151,12 +158,14 @@ def test_dataset_snapshot_is_tool_neutral_and_selected_by_manifest(tmp_path: Pat
     )
 
     assert report.episode_count == 1
+    assert report.observation_count == 2
     assert report.media_count == 1
     assert report.copied_media_count == 0
     assert {path.name for path in output_directory.iterdir() if path.is_file()} == {
         "format.json",
         "samples.parquet",
         "measurements.parquet",
+        "observations.parquet",
         "media.parquet",
         "check_runs.parquet",
         "tags.parquet",
@@ -194,6 +203,16 @@ def test_dataset_snapshot_is_tool_neutral_and_selected_by_manifest(tmp_path: Pat
         ("artifact//wrist_cam/compressed", None, str(preview_file.resolve())),
         ("caption", None, "sample fold-shirt"),
         ("quality/score", 0.75, None),
+    ]
+    assert duckdb.execute(
+        """
+        SELECT observation_id, timestamp_ns, key, value_double, value_bool
+        FROM read_parquet(?) ORDER BY key
+        """,
+        [str(output_directory / "observations.parquet")],
+    ).fetchall() == [
+        ("frame:1", 10, "reviewed", None, True),
+        ("frame:1", 10, "score", 0.75, None),
     ]
     media_row = duckdb.execute(
         "SELECT artifact_name, role, media_kind, mime_type, uri FROM read_parquet(?)",

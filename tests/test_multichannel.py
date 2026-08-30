@@ -8,6 +8,7 @@ represent both channels; only the topic-keyed convenience views refuse.
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from mcap.reader import make_reader
@@ -119,6 +120,44 @@ def test_episode_addresses_channels_by_id(dual_channel_source: Path) -> None:
         assert [message.data for message in cdr_channel.messages] == [
             bool(payload[-1]) for payload in CDR_PAYLOADS
         ]
+
+
+def test_episode_streams_several_decoded_channels_in_bounded_batches(
+    dual_channel_source: Path,
+) -> None:
+    with Episode(dual_channel_source) as episode:
+        decoded_batches = list(episode.iter_decoded_batches(batch_max_messages=2))
+        channel_info_by_encoding = {
+            channel_info.message_encoding: channel_info
+            for channel_info in episode.channels.values()
+        }
+
+    decoded_messages_by_channel_id: dict[int, list[Any]] = {}
+    log_times_by_channel_id: dict[int, list[int]] = {}
+    for decoded_batch in decoded_batches:
+        assert len(decoded_batch) <= 2
+        decoded_messages_by_channel_id.setdefault(decoded_batch.channel_id, []).extend(
+            decoded_batch.messages
+        )
+        log_times_by_channel_id.setdefault(decoded_batch.channel_id, []).extend(
+            decoded_batch.log_times.tolist()
+        )
+
+    json_channel_id = channel_info_by_encoding["json"].channel_id
+    cdr_channel_id = channel_info_by_encoding["cdr"].channel_id
+    assert decoded_messages_by_channel_id[json_channel_id] == [
+        json.loads(payload) for payload in JSON_PAYLOADS
+    ]
+    assert [message.data for message in decoded_messages_by_channel_id[cdr_channel_id]] == [
+        bool(payload[-1]) for payload in CDR_PAYLOADS
+    ]
+    assert log_times_by_channel_id[json_channel_id] == [0, 10**9, 2 * 10**9]
+    assert log_times_by_channel_id[cdr_channel_id] == [
+        500_000_000,
+        1_500_000_000,
+        2_500_000_000,
+        3_500_000_000,
+    ]
 
 
 def test_episode_unknown_keys_raise_helpfully(dual_channel_source: Path) -> None:

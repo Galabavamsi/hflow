@@ -63,6 +63,8 @@ CATALOG_TABLE_BROWSING_ORDER = (
     "check_runs_latest",
     "measurements",
     "measurements_latest",
+    "observations",
+    "observations_latest",
     "tags",
     "intervals",
     "ingest_failures",

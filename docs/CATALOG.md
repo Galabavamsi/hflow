@@ -32,9 +32,9 @@ entry.run_fingerprint  # content hash of versions + the observable run outcome
 entry.written  # False when this exact run was already recorded
 ```
 
-One append writes one Parquet file into each of five table directories under
+One append writes one Parquet file into each of six table directories under
 `<data_root>/catalog/`, all named `<episode_id>-<run_fingerprint>.parquet`.
-A sixth directory, `ingest_failures/`, records the attempts that produced no
+A separate `ingest_failures/` directory records the attempts that produced no
 append at all:
 
 | Table | One row per | Carries |
@@ -42,6 +42,7 @@ append at all:
 | `episodes` | episode append | `uri`, `source_uri`, version stamps (`schema_version`, `pipeline_version`, `robot_software_version`, `ffmpeg_version`), promoted semantics (`task`, `operator`, `success`, `embodiment`), the rest of `episode/v1` as `metadata_json`, `quarantined` + `quarantine_tags_json`, `orchestrator_run_id`, `recorded_at` |
 | `check_runs` | (episode, step) invocation | `check_name`, `check_version`, `critical`, `status`, `duration_s`, `error`; present even when a step produced nothing, which is what makes coverage countable |
 | `measurements` | measurement key | `key`, typed value columns (`value_double`, `value_text`, `value_bool`), the producing `check_name`/`check_version` |
+| `observations` | observation field | `observation_id`, `timestamp_ns`, `key`, typed value columns, and the producing `check_name`/`check_version` |
 | `tags` | tag | `check_name`, `tag` |
 | `intervals` | labeled time span | `label`, `start_ns`, `end_ns` |
 | `ingest_failures` | attempt that produced NO episode row | `source_uri`, `stage`, `failure_kind` (`source-missing` / `source-unreadable` / `infrastructure`), `error_type`, `message`, `pipeline_version`, `orchestrator_run_id`, `recorded_at` |
@@ -194,10 +195,55 @@ these views registered (it is what `curate()` uses; take it and explore):
 - `episodes`: the wide view for everyday cuts. It has the latest row per
   episode, a `status` column (`'quarantined'` / `'unverified'` / `'ok'`), and **one numeric
   column per measurement key** (latest value; booleans as 0/1).
-- `episodes_raw`, `check_runs`, `measurements`, `tags`, `intervals`,
+- `episodes_raw`, `check_runs`, `measurements`, `observations`, `tags`, `intervals`,
   `ingest_failures`: the long tables, exactly as stored.
 - `episodes_latest`, `measurements_latest`: one row per episode / per
   (episode, key), most recent append wins.
+- `observations_latest`: all observation fields from the latest run of each
+  `(episode_id, check_name)`; it switches the repeated result as a unit, so
+  fields omitted by a newer check version do not leak in from an older one.
+
+### Timestamped observations
+
+Episode measurements summarize a check. Observations retain the repeated
+evidence behind that summary without creating thousands of wide-view columns:
+
+```python
+return hflow.CheckResult(
+    measurements={"hand_count/agreement_fraction": agreement_fraction},
+    observations=[
+        hflow.Observation(
+            observation_id=f"frame:{frame_index}",
+            timestamp_ns=frame_timestamp_ns,
+            values={
+                "reference": reference_hand_count,
+                "prediction": predicted_hand_count,
+                "agreement": reference_hand_count == predicted_hand_count,
+                "model": model_name,
+            },
+        )
+    ],
+)
+```
+
+The stored table is long-format: one row per observation value. Pivot only the
+fields needed for a comparison:
+
+```sql
+SELECT * FROM (
+    PIVOT observations_latest
+    ON key IN ('reference', 'prediction', 'agreement', 'model')
+    USING first(coalesce(CAST(value_double AS VARCHAR), value_text,
+                         CAST(value_bool AS VARCHAR)))
+    GROUP BY episode_id, check_name, check_version, observation_id, timestamp_ns
+)
+```
+
+Use the raw `observations` table and pin `check_version` when comparing old and
+new model or prompt configurations; `observations_latest` is the current result.
+Observations are intended for sparse check output. Dense numeric telemetry
+belongs in an episode channel (including an `@app.derive(...)` channel), not in
+the catalog.
 
 ### Naming measurement keys
 

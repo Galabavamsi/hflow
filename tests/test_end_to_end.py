@@ -163,6 +163,31 @@ def test_canonical_episode_accessors(
         assert abs(frames[1].log_time_ns - frames[0].log_time_ns - 466_666_667) <= 1
 
 
+def test_canonical_episode_extracts_exact_source_frame_indices(
+    report_and_app: tuple[hflow.TestReport, hflow.App],
+) -> None:
+    report, _app = report_and_app
+    selected_frame_indices = [0, 1, 2, 7, 8, 29]
+    with hflow.Episode(report.canonical_path) as episode:
+        camera_topic = next(topic for topic in episode.cameras if "overhead_cam" in topic)
+        expected_log_times = episode.channel(camera_topic).timestamps[selected_frame_indices]
+
+        selected_frames = episode.frames_at_indices(
+            camera_topic,
+            frame_indices=selected_frame_indices,
+        )
+
+        assert [frame.log_time_ns for frame in selected_frames] == expected_log_times.tolist()
+        assert all(frame.path.read_bytes()[:2] == b"\xff\xd8" for frame in selected_frames)
+        assert (
+            episode.frames_at_indices(
+                camera_topic,
+                frame_indices=selected_frame_indices,
+            )
+            == selected_frames
+        )
+
+
 def test_arrow_export(report_and_app: tuple[hflow.TestReport, hflow.App]) -> None:
     report, _app = report_and_app
     with hflow.Episode(report.canonical_path) as episode:

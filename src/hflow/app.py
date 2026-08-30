@@ -840,6 +840,7 @@ def _raise_if_measurement_keys_collide(check_rows: Sequence[CheckRunRow]) -> Non
         "    return hflow.CheckResult(\n"
         f'        measurements={{f"{example_step}/{{key}}": value\n'
         "                      for key, value in result.measurements.items()},\n"
+        "        observations=result.observations,\n"
         "        intervals=result.intervals,\n"
         "        tags=result.tags,\n"
         "    )\n"

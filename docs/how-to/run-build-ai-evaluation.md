@@ -9,7 +9,8 @@ The example has two execution paths built around the same judgment contract:
 
 - [`pipeline.py`](../../examples/build_ai_evaluation/pipeline.py) registers
   hand count and active manipulation as `hflow.App` checks for MCAP episodes.
-  The checks return `hflow.CheckResult` measurements.
+  The checks return episode measurements plus timestamped model-output
+  observations.
 - [`evaluate.py`](../../examples/build_ai_evaluation/evaluate.py) streams the
   published Parquet frames into Inspect AI without transcoding them. Inspect
   handles OpenAI-compatible model execution, retries, structured logs, scoring,
@@ -48,6 +49,13 @@ and runs both judgments as `@app.check` steps. For a multi-camera episode, set
 `build_ai/hand_count/` and `build_ai/active_manipulation/` namespaces and
 include the parsed prediction, raw response, requested and routed models, and
 numeric token usage.
+
+Each check also writes one `hflow.Observation` at the exact sampled-frame
+timestamp. Its typed fields retain the task, prediction, raw response,
+validity, requested/routed models, and usage in the catalog's `observations`
+table. The measurements remain as convenient episode summaries; the
+observation is the per-frame record that scales to evaluations sampling more
+than one frame.
 
 Swap prompt files with `BUILD_AI_HAND_COUNT_PROMPT` and
 `BUILD_AI_ACTIVE_MANIPULATION_PROMPT`. Other request controls are

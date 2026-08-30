@@ -9,9 +9,10 @@ The runnable example is
 [`examples/egosuite_evaluation/evaluate.py`](../../examples/egosuite_evaluation/evaluate.py).
 It has two commands:
 
-- `labels` calculates the projected labels without an API key or model call.
-- `run` extracts the same selected images and asks a VLM to count the visible
-  camera wearer's hands through Inspect AI.
+- `labels` uses HFlow's multi-topic decoded batches to calculate the projected
+  labels without an API key or model call.
+- `run` uses HFlow's exact source-index frame extraction and asks a VLM to
+  count the visible camera wearer's hands through Inspect AI.
 
 ## Reference-label contract
 
@@ -35,7 +36,8 @@ For each selected source frame, the example:
 
 The default `--frame-stride 30` selects frames 0, 30, 60, and so on, which is
 about one frame per second for the 30 fps EgoDemo recordings. Both the joint
-labels and ffmpeg image extraction use those exact source-frame indices.
+labels and `hflow.Episode.frames_at_indices()` use those exact source-frame
+indices.
 
 This is a ground-truth label for **projected hand-joint presence**, not a pixel
 segmentation label. It establishes that labeled hand geometry lies in the
@@ -114,6 +116,34 @@ Set a short path for the commands below:
 ```bash
 export EGOSUITE_SAMPLE_MCAP='data/egosuite-evaluation/datasets/EgoDemo/EgoStand/mcap/Thimble Removal/a8d29fea-3cf9-47f7-ad4b-4b1d0ecb7a71.mcap'
 ```
+
+## Run the methodology as an HFlow check
+
+The HFlow pipeline applies the projection and image-only model judgment to one
+annotated episode. Configure any OpenAI-compatible endpoint and run:
+
+```bash
+export OPENAI_BASE_URL='https://openrouter.ai/api/v1'
+export OPENAI_MODEL='google/gemma-4-26b-a4b-it'
+export EGOSUITE_API_KEY_ENV='OPENROUTER_API_KEY'
+uv run --project examples/egosuite_evaluation \
+    python -m examples.egosuite_evaluation.pipeline "$EGOSUITE_SAMPLE_MCAP"
+```
+
+The `egosuite_projected_hand_visibility` check uses HFlow to decode the
+synchronized annotation topics and extract exact source frames. It records
+reference and predicted class counts, valid-output and agreement fractions,
+token usage, and zero-length timestamp intervals for mismatches or unparsed
+answers. The default is a cost-safe ten frames at `--frame-stride 30`
+equivalent sampling. Configure it with `EGOSUITE_FRAME_STRIDE`,
+`EGOSUITE_LIMIT_PER_EPISODE`, `EGOSUITE_CAMERA`, `EGOSUITE_RESPONSE_FORMAT`,
+and the other `EGOSUITE_*` environment variables defined in
+[`pipeline.py`](../../examples/egosuite_evaluation/pipeline.py).
+
+Use this entrypoint when the judgment belongs in an HFlow episode pipeline.
+Use `evaluate.py` below when comparing models over a declared dataset slice;
+Inspect retains each raw response and produces cross-episode evaluation
+summaries.
 
 ## Calculate the projected labels
 

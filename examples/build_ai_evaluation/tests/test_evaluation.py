@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import duckdb
+import hflow
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
@@ -25,9 +26,12 @@ from examples.build_ai_evaluation.judgment import (
     ACTIVE_MANIPULATION_RESPONSE_SCHEMA,
     HAND_COUNT_RESPONSE_SCHEMA,
     EvaluationTask,
+    ParsedVisionModelOutcome,
     ResponseFormat,
     TaskDefinition,
+    UnparsedVisionModelOutcome,
     evaluate_image_with_model,
+    model_output_check_result,
     parse_active_manipulation_response,
     parse_hand_count_response,
 )
@@ -155,9 +159,17 @@ def test_model_judgment_returns_hflow_measurements_for_the_replay_and_pipeline()
         max_tokens=32,
     )
 
+    assert isinstance(outcome, ParsedVisionModelOutcome)
     assert outcome.predicted_value == 2
-    assert outcome.parse_error is None
-    assert outcome.check_result.measurements == {
+    check_result = model_output_check_result(
+        task=EvaluationTask.HAND_COUNT,
+        requested_model="requested-vision-model",
+        outcome=outcome,
+        observation_id="frame:123",
+        timestamp_ns=123,
+    )
+
+    assert check_result.measurements == {
         "build_ai/hand_count/raw_response": '{"hand_count": 2}',
         "build_ai/hand_count/requested_model": "requested-vision-model",
         "build_ai/hand_count/prediction": 2,
@@ -165,6 +177,52 @@ def test_model_judgment_returns_hflow_measurements_for_the_replay_and_pipeline()
         "build_ai/hand_count/usage/prompt_tokens": 10,
         "build_ai/hand_count/usage/completion_tokens": 3,
     }
+    assert check_result.observations == [
+        hflow.Observation(
+            observation_id="frame:123",
+            timestamp_ns=123,
+            values={
+                "task": "hand-count",
+                "raw_response": '{"hand_count": 2}',
+                "requested_model": "requested-vision-model",
+                "valid": True,
+                "prediction": 2,
+                "response_model": "routed-vision-model",
+                "usage/prompt_tokens": 10,
+                "usage/completion_tokens": 3,
+            },
+        )
+    ]
+
+
+def test_unparsed_model_judgment_is_an_explicit_recoverable_outcome() -> None:
+    outcome = evaluate_image_with_model(
+        client=_FixtureOpenAICompatibleClient("unclear"),
+        model="requested-vision-model",
+        task_definition=TaskDefinition(
+            task=EvaluationTask.HAND_COUNT,
+            prompt="Count hands.",
+            response_schema={"type": "object"},
+        ),
+        image_data_url="data:image/png;base64,fixture",
+        response_format=ResponseFormat.JSON_SCHEMA,
+        temperature=None,
+        max_tokens=32,
+    )
+
+    assert isinstance(outcome, UnparsedVisionModelOutcome)
+    check_result = model_output_check_result(
+        task=EvaluationTask.HAND_COUNT,
+        requested_model="requested-vision-model",
+        outcome=outcome,
+        observation_id="frame:123",
+        timestamp_ns=123,
+    )
+    assert check_result.measurements["build_ai/hand_count/parse_error"] == (
+        "hand count must be 0, 1, or 2"
+    )
+    assert check_result.observations[0].values["valid"] is False
+    assert check_result.tags == ["build_ai/hand_count/unparsed"]
 
 
 def test_build_ai_pipeline_registers_both_judgments_as_hflow_checks() -> None:

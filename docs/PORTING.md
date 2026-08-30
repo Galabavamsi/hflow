@@ -6,7 +6,7 @@ The accessor surface exists because robotics QC scripts consume a small set of i
 
 ## The model: evidence, not verdicts
 
-A check returns `hflow.CheckResult`: **measurements** (named numbers/strings), **intervals** (labeled time spans), and **tags**. Every field is recorded regardless of pass or fail. Thresholds are not baked into the corpus, because quality heuristics are known to *invert* on real defects (smoothness metrics have scored an early-gripper-release defect *better* than clean demos); a stored measurement lets you re-decide with a query, a stored verdict bakes in the wrong call.
+A check returns `hflow.CheckResult`: **measurements** (episode summaries), **observations** (timestamped repeated evidence), **intervals** (labeled time spans), and **tags**. Every field is recorded regardless of pass or fail. Thresholds are not baked into the corpus, because quality heuristics are known to *invert* on real defects (smoothness metrics have scored an early-gripper-release defect *better* than clean demos); stored evidence lets you re-decide with a query, while a stored verdict bakes in the wrong call.
 
 A check *may* also declare a `verdict`, a boolean you compute from your own thresholds. On a check registered with `critical=True`, a `False` verdict **quarantines** the episode: it gets a `quarantined:<check>` tag and its downstream steps are skipped, so an episode with a dead camera never runs expensive enrichment. Quarantine is a tag, never a deletion. On a non-critical check, a `False` verdict records a `failed:<check>` tag and the run proceeds. A check that *crashes* is treated as infrastructure failure, not bad data: it is reported as an error and never recorded as a quality outcome.
 
@@ -104,8 +104,8 @@ registration instead of computing a verdict inside the check --
 [enabling the built-in checks](./how-to/enable-built-in-checks.md#gate-on-one)
 covers the shipped gates, writing your own, and why registration order matters.
 Gating that way keeps the evidence: a verdict computed inside the check and
-returned as a fresh `CheckResult(verdict=...)` throws away the measurements the
-instrument already produced.
+returned as a fresh `CheckResult(verdict=...)` throws away the measurements,
+observations, intervals, and tags the instrument already produced.
 
 The format-independent instrument is incubating behind a private package while
 its result model settles. Use the built-in check when you want a stable HFlow
@@ -175,6 +175,22 @@ def gripper_reached_target(ep: hflow.Episode) -> hflow.CheckResult:
 
 Each `ExtractedFrame` carries its `path` and its `log_time_ns`, so a per-frame answer can become an interval, not just a ratio.
 
+When annotations name exact source frame numbers, use the index accessor rather
+than approximating them with an FPS:
+
+```python
+labeled_frames = ep.frames_at_indices("wrist_cam", frame_indices=[12, 87, 143])
+```
+
+For synchronized annotations spread across several topics, stream decoded
+batches in one pass instead of materializing each complete channel:
+
+```python
+for batch in ep.iter_decoded_batches(topics=["/pose/left_hand", "/camera/intrinsic"]):
+    for log_time_ns, message in zip(batch.log_times, batch.messages, strict=True):
+        process_annotation(batch.topic, int(log_time_ns), message)
+```
+
 **Episode-level questions on single-image models**: composite the frames into one timestamped grid. It works even on models that accept a single image, and it cuts vision tokens from N images to one:
 
 ```python
@@ -233,6 +249,7 @@ The same is true outside checks entirely: canonical episodes open in Foxglove, R
 | Field | Type | Meaning |
 |---|---|---|
 | `measurements` | `dict[str, float \| int \| str \| bool]` | Named facts that become catalog columns (record a run with `app.test(..., record=True)`, then query with `hflow.curate()` or any Parquet reader). Name them `<topic>/<metric>_<unit>`: the topic prefix keeps two steps from claiming one key, and the unit suffix lets downstream tools label the value without guessing. |
+| `observations` | `list[hflow.Observation]` | Repeated structured evidence at episode timestamps. Each observation has a stable id, `timestamp_ns`, and scalar `values`; use it for per-frame predictions, references, human annotations, or event-level outputs without creating one episode column per sample. |
 | `intervals` | `list[hflow.Interval]` | Labeled time spans; `Interval(start_ns, end_ns, label)` in nanoseconds of log time (the same clock as `ChannelData.timestamps`). |
 | `tags` | `list[str]` | Free-form labels routed to the catalog. |
 | `verdict` | `bool \| None` | Optional, user-owned. `None` means evidence only. `False` on a `critical` check quarantines the episode. Prefer `@app.check(version="1", gate=...)` over computing this inline: a gate is evaluated over the measurements you already returned, so a threshold aimed at a missing key cannot cost you the evidence. |

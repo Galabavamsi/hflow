@@ -41,7 +41,7 @@ the file.
 A complete run can produce:
 
 - a canonical MCAP episode with provenance metadata;
-- quality measurements, intervals, tags, and quarantine status;
+- quality measurements, timestamped observations, intervals, tags, and quarantine status;
 - enrichment artifacts such as contact sheets;
 - append-only Parquet catalog rows; and
 - a version-pinned Parquet manifest selected with DuckDB SQL.
@@ -80,7 +80,7 @@ with runnable code.
 ## How does HFlow decide whether data is good?
 
 HFlow records evidence rather than imposing one universal definition of
-quality. Checks can emit measurements, intervals, tags, and an optional
+quality. Checks can emit measurements, timestamped observations, intervals, tags, and an optional
 verdict. Critical failures quarantine an episode without deleting it; later
 curation queries decide which thresholds and versions belong in a particular
 dataset.

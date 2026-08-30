@@ -35,7 +35,7 @@ from hflow.curation import (
     stale_episodes,
 )
 from hflow.doctor import DiagnosticLevel, DoctorReport, Finding, diagnose
-from hflow.episode import ChannelData, Episode, ExtractedFrame
+from hflow.episode import ChannelData, DecodedMessageBatch, Episode, ExtractedFrame
 from hflow.format import GopPreset
 from hflow.importers import import_lerobot_dataset
 from hflow.manifest import (
@@ -73,6 +73,7 @@ from hflow.steps import (
     IngestMode,
     Interval,
     MeasurementValue,
+    Observation,
     RegisteredCheck,
     RegisteredEnrichment,
     Stage,
@@ -117,6 +118,7 @@ __all__ = [
     "Comparison",
     "CurationReport",
     "DatasetSnapshotReport",
+    "DecodedMessageBatch",
     "DerivedChannel",
     "DerivedChannelManifest",
     "DerivedSeries",
@@ -138,6 +140,7 @@ __all__ = [
     "LocalStorageRoot",
     "MeasurementValue",
     "MessageBatch",
+    "Observation",
     "PipelineManifest",
     "PlannedBatch",
     "PythonMcapEpisodeReader",

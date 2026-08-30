@@ -13,6 +13,7 @@ from hflow.catalog import (
     TABLE_COLUMN_DDL,
     Catalog,
     CheckRunRow,
+    _run_fingerprint,
     content_episode_id,
     episode_status_case_sql,
 )
@@ -45,6 +46,13 @@ def _check_row(version: str = "v1", value: float = 1.0) -> CheckRunRow:
         status=hflow.CheckStatus.MEASURED,
         duration_s=0.01,
         measurements={"example_metric": value, "note": "text", "flag": True},
+        observations=[
+            hflow.Observation(
+                observation_id="frame:3",
+                timestamp_ns=30,
+                values={"score": value, "reviewed": True, "note": "clear"},
+            )
+        ],
         tags=["seen"],
         intervals=[hflow.Interval(start_ns=0, end_ns=10, label="span")],
     )
@@ -69,6 +77,149 @@ def test_append_is_idempotent_for_the_same_content_versions_and_outcome(tmp_path
     assert first.episode_id == second.episode_id == content_episode_id(canonical)
     parquet_files = list((tmp_path / "catalog" / "measurements").glob("*.parquet"))
     assert len(parquet_files) == 1
+
+
+def test_checks_without_observations_keep_the_pre_observation_fingerprint() -> None:
+    check_row = CheckRunRow(
+        check_name="compat",
+        check_version="v1",
+        critical=False,
+        status=hflow.CheckStatus.MEASURED,
+        duration_s=1.0,
+        measurements={"score": 1.0},
+        tags=["seen"],
+        intervals=[hflow.Interval(start_ns=0, end_ns=10, label="span")],
+    )
+
+    assert _run_fingerprint("episode-id", "pipeline-v1", [check_row], []) == "b47ee98776b1"
+
+
+def test_timestamped_observations_round_trip_as_typed_long_rows(tmp_path: Path) -> None:
+    catalog = Catalog(tmp_path / "catalog")
+    check_result = hflow.CheckResult(
+        observations=[
+            hflow.Observation(
+                observation_id="frame:3",
+                timestamp_ns=30,
+                values={"score": 1.0, "reviewed": True, "note": "clear"},
+            )
+        ]
+    )
+    catalog.append_episode(
+        canonical_path=_fake_canonical(tmp_path),
+        stamps=FAKE_STAMPS,
+        episode_metadata={},
+        check_rows=[
+            CheckRunRow.from_result(
+                check_name="example_check",
+                check_version="v1",
+                critical=False,
+                status=hflow.CheckStatus.MEASURED,
+                duration_s=0.01,
+                error=None,
+                result=check_result,
+            )
+        ],
+    )
+
+    connection = open_catalog_connection(tmp_path / "catalog")
+    try:
+        assert connection.execute(
+            """
+            SELECT observation_id, timestamp_ns, key, value_double, value_text, value_bool
+            FROM observations_latest
+            ORDER BY key
+            """
+        ).fetchall() == [
+            ("frame:3", 30, "note", None, "clear", None),
+            ("frame:3", 30, "reviewed", None, None, True),
+            ("frame:3", 30, "score", 1.0, None, None),
+        ]
+        assert connection.execute(
+            """
+            SELECT observation_id, timestamp_ns, note, reviewed, score
+            FROM (
+                PIVOT observations_latest
+                ON key IN ('note', 'reviewed', 'score')
+                USING first(coalesce(CAST(value_double AS VARCHAR), value_text,
+                                     CAST(value_bool AS VARCHAR)))
+                GROUP BY episode_id, check_name, check_version,
+                         observation_id, timestamp_ns
+            )
+            """
+        ).fetchall() == [("frame:3", 30, "clear", "true", "1.0")]
+    finally:
+        connection.close()
+
+
+def test_observations_latest_switches_a_check_result_as_one_unit(tmp_path: Path) -> None:
+    import time
+
+    catalog = Catalog(tmp_path / "catalog")
+    canonical = _fake_canonical(tmp_path)
+    catalog.append_episode(
+        canonical_path=canonical,
+        stamps=FAKE_STAMPS,
+        episode_metadata={},
+        check_rows=[_check_row(version="model-a")],
+    )
+    time.sleep(0.01)
+    replacement_row = _check_row(version="model-b")
+    replacement_row = hflow.CheckRunRow(
+        check_name=replacement_row.check_name,
+        check_version=replacement_row.check_version,
+        critical=replacement_row.critical,
+        status=replacement_row.status,
+        duration_s=replacement_row.duration_s,
+        observations=[
+            hflow.Observation(
+                observation_id="frame:3",
+                timestamp_ns=30,
+                values={"score": 0.5},
+            )
+        ],
+    )
+    catalog.append_episode(
+        canonical_path=canonical,
+        stamps=FAKE_STAMPS,
+        episode_metadata={},
+        check_rows=[replacement_row],
+    )
+
+    connection = open_catalog_connection(tmp_path / "catalog")
+    try:
+        assert connection.execute(
+            "SELECT check_version, key, value_double FROM observations_latest"
+        ).fetchall() == [("model-b", "score", 0.5)]
+        assert connection.execute("SELECT count(*) FROM observations").fetchone() == (4,)
+    finally:
+        connection.close()
+
+
+def test_duplicate_observation_ids_are_refused_before_catalog_writes(tmp_path: Path) -> None:
+    duplicate_observations = [
+        hflow.Observation(observation_id="frame:3", timestamp_ns=30, values={"score": 1.0}),
+        hflow.Observation(observation_id="frame:3", timestamp_ns=30, values={"score": 0.5}),
+    ]
+    check_row = _check_row()
+    check_row = hflow.CheckRunRow(
+        check_name=check_row.check_name,
+        check_version=check_row.check_version,
+        critical=check_row.critical,
+        status=check_row.status,
+        duration_s=check_row.duration_s,
+        observations=duplicate_observations,
+    )
+
+    with pytest.raises(ValueError, match="duplicate observation id 'frame:3'"):
+        Catalog(tmp_path / "catalog").append_episode(
+            canonical_path=_fake_canonical(tmp_path),
+            stamps=FAKE_STAMPS,
+            episode_metadata={},
+            check_rows=[check_row],
+        )
+
+    assert not list((tmp_path / "catalog" / "episodes").glob("*.parquet"))
 
 
 def test_the_orchestrator_run_id_is_recorded_without_entering_the_fingerprint(
@@ -1588,7 +1739,14 @@ def test_crash_repaired_append_keeps_one_recorded_at_across_tables(tmp_path: Pat
     connection = duckdb.connect()
     try:
         timestamps = set()
-        for table_name in ("episodes", "check_runs", "measurements", "tags", "intervals"):
+        for table_name in (
+            "episodes",
+            "check_runs",
+            "measurements",
+            "observations",
+            "tags",
+            "intervals",
+        ):
             table_file = tmp_path / "catalog" / table_name / f"{stem}.parquet"
             assert table_file.is_file(), f"{table_name} file missing after repair"
             rows = connection.execute(
@@ -1655,7 +1813,14 @@ def test_replaying_an_append_heals_dependents_left_stale_by_a_crashed_repair(
     connection = duckdb.connect()
     try:
         timestamps = set()
-        for table_name in ("episodes", "check_runs", "measurements", "tags", "intervals"):
+        for table_name in (
+            "episodes",
+            "check_runs",
+            "measurements",
+            "observations",
+            "tags",
+            "intervals",
+        ):
             table_file = tmp_path / "catalog" / table_name / f"{stem}.parquet"
             rows = connection.execute(
                 f"SELECT DISTINCT CAST(recorded_at AS VARCHAR) FROM read_parquet('{table_file}')"
@@ -1771,7 +1936,14 @@ def test_concurrent_append_of_the_identical_outcome_keeps_one_recorded_at(
     connection = duckdb.connect()
     try:
         timestamps = set()
-        for table_name in ("episodes", "check_runs", "measurements", "tags", "intervals"):
+        for table_name in (
+            "episodes",
+            "check_runs",
+            "measurements",
+            "observations",
+            "tags",
+            "intervals",
+        ):
             table_file = tmp_path / "catalog" / table_name / f"{stem}.parquet"
             assert table_file.is_file(), f"{table_name} file missing after the race"
             rows = connection.execute(

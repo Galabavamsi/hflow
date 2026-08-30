@@ -9,7 +9,7 @@ applies the manifest-last idiom to the output.
 
 Views registered on the connection:
 
-- ``episodes_raw``, ``check_runs``, ``measurements``, ``tags``,
+- ``episodes_raw``, ``check_runs``, ``measurements``, ``observations``, ``tags``,
   ``intervals`` -- the long tables, exactly as stored.
 - ``episodes_latest`` -- one row per SOURCE RECORDING (most recent append).
   Ranking per source rather than per ``episode_id`` is what makes this the
@@ -30,6 +30,8 @@ Views registered on the connection:
 - ``measurements_latest`` -- one row per (episode_id, key), most recent by
   the OWNING episode's recorded_at (joined in), not the measurement row's
   own -- the latter can go stale independently of the episode it belongs to.
+- ``observations_latest`` -- every timestamped observation field from the
+  latest run of each (episode, check), switched as one coherent result.
 - ``episodes`` -- the wide view for everyday queries: latest episode rows,
   a ``status`` column (``'quarantined'``/``'unverified'``/``'ok'``), and one numeric column
   per measurement key (booleans as 0/1; text-valued measurements stay in the
@@ -72,6 +74,7 @@ _LONG_TABLE_NAMES = (
     "episodes_raw",
     "check_runs",
     "measurements",
+    "observations",
     "tags",
     "intervals",
     INGEST_FAILURES_TABLE_NAME,
@@ -87,6 +90,7 @@ _TABLE_DIRECTORIES = {
     "episodes_raw": "episodes",
     "check_runs": "check_runs",
     "measurements": "measurements",
+    "observations": "observations",
     "tags": "tags",
     "intervals": "intervals",
     # The complement of `episodes`: attempts that produced no row there. Not a
@@ -397,6 +401,15 @@ def _register_catalog_relations(
         ) WHERE row_rank = 1
         """
     )
+    connection.execute(
+        """
+        CREATE VIEW observations_latest AS
+        SELECT observations.* REPLACE (latest_check_run.recorded_at AS recorded_at)
+        FROM observations
+        JOIN check_runs_latest latest_check_run
+          USING (episode_id, run_fingerprint, check_name, check_version)
+        """
+    )
     measurement_keys = [
         str(row[0])
         for row in connection.execute(
@@ -469,6 +482,7 @@ def _refresh_local_catalog_connection(
 
     derived_view_names = (
         "episodes",
+        "observations_latest",
         "check_runs_latest",
         "measurements_latest",
         "episodes_latest",

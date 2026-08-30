@@ -15,14 +15,11 @@ prerequisites, and exact commands.
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import importlib.metadata
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
 from collections import Counter, defaultdict
 from collections.abc import Iterator, Mapping, Sequence
@@ -47,8 +44,6 @@ from inspect_ai.model import (
 from inspect_ai.scorer import Score, Scorer, Target, categorical, mean, scorer
 from inspect_ai.solver import TaskState
 from inspect_ai.util import JSONSchema
-from mcap.reader import make_reader
-from mcap_protobuf.decoder import DecoderFactory as ProtobufDecoderFactory
 
 REPOSITORY_ROOT = str(Path(__file__).resolve().parents[2])
 if REPOSITORY_ROOT not in sys.path:
@@ -61,32 +56,27 @@ from examples.egosuite_evaluation.geometry import (  # noqa: E402
     Quaternion,
     project_world_joints,
 )
+from examples.egosuite_evaluation.judgment import (  # noqa: E402
+    DEFAULT_PROMPT_PATH,
+    HAND_COUNT_RESPONSE_SCHEMA,
+    ResponseFormat,
+    image_file_data_url,
+    parse_hand_count_response,
+)
 
 SCHEMA_VERSION = 1
 EXPECTED_HAND_JOINT_COUNT = 21
-DEFAULT_PROMPT_PATH = Path(__file__).with_name("prompts") / "hand_count.txt"
 DEFAULT_RUNS_DIRECTORY = Path("data/egosuite-evaluation/runs")
 DEFAULT_LABELS_DIRECTORY = Path("data/egosuite-evaluation/labels")
 INSPECT_LOGS_DIRECTORY_NAME = "logs"
 RUN_METADATA_FILE_NAME = "run.json"
 SUMMARY_FILE_NAME = "summary.json"
 INSPECT_OPENAI_COMPATIBLE_SERVICE_NAME = "hflow-egosuite-evaluation"
-HAND_COUNT_RESPONSE_SCHEMA: dict[str, object] = {
-    "type": "object",
-    "properties": {"hand_count": {"type": "integer", "enum": [0, 1, 2]}},
-    "required": ["hand_count"],
-}
 
 
 class CameraView(StrEnum):
     HEAD_LEFT = "head-left"
     HEAD_RIGHT = "head-right"
-
-
-class ResponseFormat(StrEnum):
-    JSON_SCHEMA = "json-schema"
-    JSON_OBJECT = "json-object"
-    TEXT = "text"
 
 
 @dataclass(frozen=True)
@@ -150,7 +140,7 @@ class EvaluationConfiguration:
     label: str
 
 
-def _camera_topics(camera_view: CameraView) -> CameraTopics:
+def camera_topics(camera_view: CameraView) -> CameraTopics:
     camera_name = camera_view.value.replace("-", "_")
     topic_prefix = f"/sensor/camera/{camera_name}"
     return CameraTopics(
@@ -338,18 +328,12 @@ def _hand_issue_reasons(decoded_message: Any) -> tuple[tuple[str, ...], tuple[st
     return tuple(left_reasons), tuple(right_reasons)
 
 
-def _topic_message_counts(source_path: Path) -> dict[str, int]:
-    with source_path.open("rb") as source_stream:
-        summary = make_reader(source_stream).get_summary()
-    if summary is None or summary.statistics is None:
-        raise ValueError(f"MCAP summary statistics are required: {source_path}")
+def _topic_message_counts(episode: hflow.Episode) -> dict[str, int]:
     counts_by_topic: dict[str, int] = {}
-    for channel_id, channel in summary.channels.items():
-        if channel.topic in counts_by_topic:
-            raise ValueError(f"duplicate MCAP topic {channel.topic!r} in {source_path}")
-        counts_by_topic[channel.topic] = int(
-            summary.statistics.channel_message_counts.get(channel_id, 0)
-        )
+    for channel_info in episode.channels.values():
+        if channel_info.topic in counts_by_topic:
+            raise ValueError(f"duplicate MCAP topic {channel_info.topic!r} in {episode.path}")
+        counts_by_topic[channel_info.topic] = channel_info.message_count
     return counts_by_topic
 
 
@@ -358,7 +342,7 @@ def _required_frame_count(
     camera_view: CameraView,
     counts_by_topic: Mapping[str, int],
 ) -> int:
-    topics = _camera_topics(camera_view)
+    topics = camera_topics(camera_view)
     required_topics = (
         topics.video,
         topics.intrinsic,
@@ -434,84 +418,81 @@ def load_projected_hand_labels(
         raise ValueError("frame stride must be positive")
     if limit_per_episode is not None and limit_per_episode <= 0:
         raise ValueError("limit per episode must be positive")
-    camera_topics = _camera_topics(camera_view)
+    selected_camera_topics = camera_topics(camera_view)
     expected_camera_frame = camera_view.value.replace("-", "_") + "_camera"
     decoded_topics = (
         "/pose/left_hand",
         "/pose/right_hand",
         "/annotation/bad_frame/pose/hand",
-        camera_topics.intrinsic,
-        camera_topics.extrinsic,
+        selected_camera_topics.intrinsic,
+        selected_camera_topics.extrinsic,
     )
-    source_frame_count = _required_frame_count(
-        source_path,
-        camera_view,
-        _topic_message_counts(source_path),
-    )
-    selected_frame_indices = _selected_frame_indices(
-        source_path,
-        source_frame_count,
-        frame_stride=frame_stride,
-        limit_per_episode=limit_per_episode,
-        samples_per_episode=samples_per_episode,
-        sample_seed=sample_seed,
-    )
-    partial_geometry_by_frame = {
-        frame_index: _PartialFrameGeometry() for frame_index in selected_frame_indices
-    }
-    message_index_by_topic: defaultdict[str, int] = defaultdict(int)
-    with source_path.open("rb") as source_stream:
-        reader = make_reader(
-            source_stream,
-            decoder_factories=[ProtobufDecoderFactory()],
-        )
-        for _schema, channel, _message, decoded_message in reader.iter_decoded_messages(
-            topics=list(decoded_topics), log_time_order=True
-        ):
-            topic = channel.topic
-            source_frame_index = message_index_by_topic[topic]
-            message_index_by_topic[topic] += 1
-            _validate_header_count(topic, source_frame_index, decoded_message)
-            partial_geometry = partial_geometry_by_frame.get(source_frame_index)
-            if partial_geometry is None:
-                continue
-            match topic:
-                case "/pose/left_hand":
-                    partial_geometry.left_hand_joints = _hand_joints_from_message(
-                        topic, decoded_message
-                    )
-                case "/pose/right_hand":
-                    partial_geometry.right_hand_joints = _hand_joints_from_message(
-                        topic, decoded_message
-                    )
-                case "/annotation/bad_frame/pose/hand":
-                    (
-                        partial_geometry.left_hand_issue_reasons,
-                        partial_geometry.right_hand_issue_reasons,
-                    ) = _hand_issue_reasons(decoded_message)
-                case intrinsic_topic if intrinsic_topic == camera_topics.intrinsic:
-                    partial_geometry.calibration = _calibration_from_message(topic, decoded_message)
-                case extrinsic_topic if extrinsic_topic == camera_topics.extrinsic:
-                    partial_geometry.camera_pose_in_world = _camera_pose_from_message(
-                        topic, expected_camera_frame, decoded_message
-                    )
-                case unexpected_topic:
-                    raise AssertionError(f"unexpected decoded topic: {unexpected_topic}")
-    decoded_count_by_topic = {topic: message_index_by_topic[topic] for topic in decoded_topics}
-    if any(count != source_frame_count for count in decoded_count_by_topic.values()):
-        raise ValueError(
-            f"decoded EgoSuite topics are not frame-aligned in {source_path}: "
-            f"{decoded_count_by_topic}"
-        )
-    return [
-        _complete_projected_label(
+    with hflow.Episode(source_path) as episode:
+        source_frame_count = _required_frame_count(
             source_path,
             camera_view,
-            frame_index,
-            partial_geometry_by_frame[frame_index],
+            _topic_message_counts(episode),
         )
-        for frame_index in selected_frame_indices
-    ]
+        selected_frame_indices = _selected_frame_indices(
+            source_path,
+            source_frame_count,
+            frame_stride=frame_stride,
+            limit_per_episode=limit_per_episode,
+            samples_per_episode=samples_per_episode,
+            sample_seed=sample_seed,
+        )
+        partial_geometry_by_frame = {
+            frame_index: _PartialFrameGeometry() for frame_index in selected_frame_indices
+        }
+        message_index_by_topic: defaultdict[str, int] = defaultdict(int)
+        for decoded_batch in episode.iter_decoded_batches(topics=decoded_topics):
+            topic = decoded_batch.topic
+            for decoded_message in decoded_batch.messages:
+                source_frame_index = message_index_by_topic[topic]
+                message_index_by_topic[topic] += 1
+                _validate_header_count(topic, source_frame_index, decoded_message)
+                partial_geometry = partial_geometry_by_frame.get(source_frame_index)
+                if partial_geometry is None:
+                    continue
+                match topic:
+                    case "/pose/left_hand":
+                        partial_geometry.left_hand_joints = _hand_joints_from_message(
+                            topic, decoded_message
+                        )
+                    case "/pose/right_hand":
+                        partial_geometry.right_hand_joints = _hand_joints_from_message(
+                            topic, decoded_message
+                        )
+                    case "/annotation/bad_frame/pose/hand":
+                        (
+                            partial_geometry.left_hand_issue_reasons,
+                            partial_geometry.right_hand_issue_reasons,
+                        ) = _hand_issue_reasons(decoded_message)
+                    case intrinsic_topic if intrinsic_topic == selected_camera_topics.intrinsic:
+                        partial_geometry.calibration = _calibration_from_message(
+                            topic, decoded_message
+                        )
+                    case extrinsic_topic if extrinsic_topic == selected_camera_topics.extrinsic:
+                        partial_geometry.camera_pose_in_world = _camera_pose_from_message(
+                            topic, expected_camera_frame, decoded_message
+                        )
+                    case unexpected_topic:
+                        raise AssertionError(f"unexpected decoded topic: {unexpected_topic}")
+        decoded_count_by_topic = {topic: message_index_by_topic[topic] for topic in decoded_topics}
+        if any(count != source_frame_count for count in decoded_count_by_topic.values()):
+            raise ValueError(
+                f"decoded EgoSuite topics are not frame-aligned in {source_path}: "
+                f"{decoded_count_by_topic}"
+            )
+        return [
+            _complete_projected_label(
+                source_path,
+                camera_view,
+                frame_index,
+                partial_geometry_by_frame[frame_index],
+            )
+            for frame_index in selected_frame_indices
+        ]
 
 
 def select_stratified_labels(
@@ -570,7 +551,6 @@ def _extract_sampled_frames(
     labels: Sequence[ProjectedHandFrameLabel],
     *,
     camera_view: CameraView,
-    frame_stride: int,
     frame_cache_directory: Path,
 ) -> list[Path]:
     if not labels:
@@ -580,85 +560,20 @@ def _extract_sampled_frames(
         raise ValueError(f"selected frame indices must be unique and ordered: {source_path}")
     if any(label.source_path != source_path for label in labels):
         raise ValueError(f"selected labels do not all belong to {source_path}")
-    selection_hash = _sha256_text(
-        ",".join(str(frame_index) for frame_index in selected_frame_indices)
-    )[:12]
     episode_cache_directory = frame_cache_directory / _frame_cache_key(source_path)
-    extraction_directory = episode_cache_directory / (
-        f"{camera_view.value}-selection-{selection_hash}-count-{len(labels)}"
-    )
-    expected_frame_paths = [
-        extraction_directory / f"frame_{output_index:06d}.jpg"
-        for output_index in range(len(labels))
-    ]
-    if all(path.is_file() for path in expected_frame_paths):
-        return expected_frame_paths
-    if extraction_directory.exists():
-        shutil.rmtree(extraction_directory)
-    staging_directory = extraction_directory.with_name(f"{extraction_directory.name}.tmp")
-    if staging_directory.exists():
-        shutil.rmtree(staging_directory)
-    staging_directory.mkdir(parents=True)
-    camera_topic = _camera_topics(camera_view).video
+    camera_topic = camera_topics(camera_view).video
     with hflow.Episode(source_path, workdir=episode_cache_directory) as episode:
-        video_path = episode.video(camera_topic)
-    ffmpeg_executable = shutil.which("ffmpeg")
-    if ffmpeg_executable is None:
-        raise RuntimeError("ffmpeg is required to extract EgoSuite evaluation images")
-    command = [
-        ffmpeg_executable,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-i",
-        str(video_path),
-    ]
-    regular_frame_indices = [
-        selected_ordinal * frame_stride for selected_ordinal in range(len(labels))
-    ]
-    if selected_frame_indices == regular_frame_indices:
-        if frame_stride > 1:
-            command += ["-vf", f"select=not(mod(n\\,{frame_stride}))"]
-    else:
-        selection_expression = "+".join(
-            f"eq(n\\,{frame_index})" for frame_index in selected_frame_indices
+        extracted_frames = episode.frames_at_indices(
+            camera_topic,
+            frame_indices=selected_frame_indices,
         )
-        command += ["-vf", f"select={selection_expression}"]
-    command += [
-        "-fps_mode",
-        "vfr",
-        "-frames:v",
-        str(len(labels)),
-        "-q:v",
-        "2",
-        "-start_number",
-        "0",
-        str(staging_directory / "frame_%06d.jpg"),
-    ]
-    completed_process = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    staged_frame_paths = sorted(staging_directory.glob("frame_*.jpg"))
-    if completed_process.returncode != 0 or len(staged_frame_paths) != len(labels):
-        stderr_tail = completed_process.stderr.strip().splitlines()[-8:]
-        shutil.rmtree(staging_directory)
-        raise RuntimeError(
-            f"ffmpeg extracted {len(staged_frame_paths)} of {len(labels)} frames from "
-            f"{source_path} (exit {completed_process.returncode}): {stderr_tail}"
-        )
-    staging_directory.replace(extraction_directory)
-    return expected_frame_paths
+    return [extracted_frame.path for extracted_frame in extracted_frames]
 
 
 def prepare_evaluation_frames(
     labels_by_source: Mapping[Path, Sequence[ProjectedHandFrameLabel]],
     *,
     camera_view: CameraView,
-    frame_stride: int,
     frame_cache_directory: Path,
 ) -> list[PreparedEvaluationFrame]:
     prepared_frames: list[PreparedEvaluationFrame] = []
@@ -667,7 +582,6 @@ def prepare_evaluation_frames(
             source_path,
             labels,
             camera_view=camera_view,
-            frame_stride=frame_stride,
             frame_cache_directory=frame_cache_directory,
         )
         prepared_frames.extend(
@@ -675,45 +589,6 @@ def prepare_evaluation_frames(
             for label, image_path in zip(labels, image_paths, strict=True)
         )
     return prepared_frames
-
-
-def _image_data_url(image_path: Path) -> str:
-    image_bytes = image_path.read_bytes()
-    if not image_bytes.startswith(b"\xff\xd8\xff"):
-        raise ValueError(f"evaluation frame is not JPEG: {image_path}")
-    encoded_image = base64.b64encode(image_bytes).decode("ascii")
-    return f"data:image/jpeg;base64,{encoded_image}"
-
-
-def _strip_markdown_code_fence(response_text: str) -> str:
-    stripped_response = response_text.strip()
-    code_fence_match = re.fullmatch(
-        r"```(?:json)?\s*(.*?)\s*```",
-        stripped_response,
-        flags=re.DOTALL | re.IGNORECASE,
-    )
-    return code_fence_match.group(1).strip() if code_fence_match else stripped_response
-
-
-def parse_hand_count_response(response_text: str) -> int:
-    stripped_response = _strip_markdown_code_fence(response_text)
-    try:
-        parsed_response: object = json.loads(stripped_response)
-    except json.JSONDecodeError:
-        parsed_response = stripped_response
-    if isinstance(parsed_response, dict):
-        parsed_response = parsed_response.get("hand_count")
-    if isinstance(parsed_response, bool):
-        raise ValueError("hand count must be 0, 1, or 2")
-    if isinstance(parsed_response, int):
-        hand_count = parsed_response
-    elif isinstance(parsed_response, str) and re.fullmatch(r"[012]", parsed_response.strip()):
-        hand_count = int(parsed_response)
-    else:
-        raise ValueError("hand count must be 0, 1, or 2")
-    if hand_count not in {0, 1, 2}:
-        raise ValueError("hand count must be 0, 1, or 2")
-    return hand_count
 
 
 def _inspect_sample(frame: PreparedEvaluationFrame, prompt: str) -> Sample:
@@ -724,7 +599,7 @@ def _inspect_sample(frame: PreparedEvaluationFrame, prompt: str) -> Sample:
             ChatMessageUser(
                 content=[
                     ContentText(text=prompt),
-                    ContentImage(image=_image_data_url(frame.image_path)),
+                    ContentImage(image=image_file_data_url(frame.image_path)),
                 ]
             )
         ],
@@ -1216,7 +1091,6 @@ def run_evaluation(configuration: EvaluationConfiguration) -> dict[str, object]:
     prepared_frames = prepare_evaluation_frames(
         labels_by_source,
         camera_view=configuration.camera_view,
-        frame_stride=configuration.frame_stride,
         frame_cache_directory=configuration.output_directory / "frames",
     )
     inspect_logs_directory = configuration.output_directory / INSPECT_LOGS_DIRECTORY_NAME

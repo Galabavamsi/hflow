@@ -47,6 +47,7 @@ dataset-snapshot/
 ├── format.json
 ├── samples.parquet
 ├── measurements.parquet
+├── observations.parquet
 ├── media.parquet
 ├── check_runs.parquet
 ├── tags.parquet
@@ -67,6 +68,7 @@ The Parquet tables form one snapshot:
 | --- | --- |
 | `samples.parquet` | The generic entry point: one row per selected episode, with identity, canonical/source URI, promoted metadata, version stamps, status, wide numeric or boolean measurements, and nullable `media_*` columns for one representative artifact. |
 | `measurements.parquet` | One row per latest `(episode_id, key)`, with separate number, text, and boolean value columns. This preserves typed evidence that does not belong in the wide table. |
+| `observations.parquet` | Timestamped, repeated evidence from each latest check run, one typed row per observation field. |
 | `media.parquet` | One row per artifact measurement: artifact name, producing step and version, role, inferred media kind and MIME type, URI, and timestamp. This table preserves every artifact even though `samples.parquet` has one representative artifact per episode. |
 | `check_runs.parquet` | The latest run of each producing step per episode, including status, duration, and error. |
 | `tags.parquet` | Tags belonging to those latest step runs. |

@@ -106,7 +106,14 @@ def test_concurrent_bucket_catalog_appends_publish_one_complete_outcome(
     timestamps: set[str] = set()
     connection = duckdb.connect()
     try:
-        for table_name in ("episodes", "check_runs", "measurements", "tags", "intervals"):
+        for table_name in (
+            "episodes",
+            "check_runs",
+            "measurements",
+            "observations",
+            "tags",
+            "intervals",
+        ):
             table_file = remote_dir / "catalog" / table_name / f"{stem}.parquet"
             assert table_file.is_file()
             rows = connection.execute(

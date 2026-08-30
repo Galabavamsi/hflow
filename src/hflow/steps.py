@@ -1,7 +1,7 @@
 """Step types: what a quality check receives and returns.
 
 A check is a plain function ``(Episode) -> CheckResult``. It records
-*evidence* -- measurements, time intervals, tags -- not verdicts; pass/fail
+*evidence* -- measurements, timestamped observations, time intervals, tags -- not verdicts; pass/fail
 policy belongs to the consumer at curation time (docs/ARCHITECTURE.md,
 "Quality checks and curation"). A check MAY declare a user-owned ``verdict``:
 on a check registered with ``critical=True``, a False verdict quarantines the
@@ -166,11 +166,31 @@ class Interval:
     label: str = ""
 
 
+@dataclass(frozen=True)
+class Observation:
+    """One structured observation aligned to an episode timestamp.
+
+    ``observation_id`` is stable within the producing check (for example a
+    frame index or annotation id). ``values`` carries scalar fields such as a
+    reference, prediction, validity flag, latency, or raw response. The
+    catalog stores one long-format row per value, keeping repeated evidence
+    queryable without turning every sample into an episode-level column.
+    Observations are for sparse check outputs; use a derived channel for dense
+    numeric telemetry that belongs in the episode itself.
+    """
+
+    observation_id: str
+    timestamp_ns: int
+    values: dict[str, MeasurementValue]
+
+
 @dataclass
 class CheckResult:
     """What a check returns. Everything here lands in the episode's catalog row.
 
     :param measurements: Named numeric/string facts (catalog columns).
+    :param observations: Repeated structured evidence aligned to episode
+        timestamps (for example per-frame predictions and references).
     :param intervals: Labeled time spans (e.g. detected freezes).
     :param tags: Free-form labels routed to the catalog.
     :param verdict: Optional user-owned pass/fail. ``None`` means the check
@@ -179,6 +199,7 @@ class CheckResult:
     """
 
     measurements: dict[str, MeasurementValue] = field(default_factory=dict)
+    observations: list[Observation] = field(default_factory=list)
     intervals: list[Interval] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     verdict: bool | None = None

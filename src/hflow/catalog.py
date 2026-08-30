@@ -2,7 +2,7 @@
 
 The production warehouse pattern, collapsed to its single-tenant equivalent
 (docs/ARCHITECTURE.md, "Catalog and curation storage"): every ingest appends
-one row per episode plus long-format measurement/tag/interval rows, all as
+one row per episode plus long-format measurement/observation/tag/interval rows, all as
 plain Parquet files DuckDB (or pandas, or anything) reads directly. No
 services, no database.
 
@@ -28,6 +28,7 @@ mirror (see ``hflow.storage``) -- the idioms above carry over unchanged.
 - ``check_runs``: one row per (episode, check) invocation with its status --
   the coverage denominator, present even when a check produced nothing.
 - ``measurements``: long format, one row per measurement key.
+- ``observations``: long format, one row per field of timestamped evidence.
 - ``tags`` / ``intervals``: as recorded by checks.
 """
 
@@ -44,7 +45,7 @@ import duckdb
 import numpy as np
 
 from hflow.format import CATALOG_FORMAT_VERSION
-from hflow.steps import CheckResult, CheckStatus, Interval, MeasurementValue
+from hflow.steps import CheckResult, CheckStatus, Interval, MeasurementValue, Observation
 from hflow.storage import (
     BucketStorageRoot,
     LocalStorageRoot,
@@ -78,6 +79,12 @@ TABLE_COLUMN_DDL: dict[str, str] = {
         "check_version VARCHAR, key VARCHAR, value_double DOUBLE, "
         "value_text VARCHAR, value_bool BOOLEAN, recorded_at TIMESTAMPTZ"
     ),
+    "observations": (
+        "episode_id VARCHAR, run_fingerprint VARCHAR, check_name VARCHAR, "
+        "check_version VARCHAR, observation_id VARCHAR, timestamp_ns BIGINT, "
+        "key VARCHAR, value_double DOUBLE, value_text VARCHAR, value_bool BOOLEAN, "
+        "recorded_at TIMESTAMPTZ"
+    ),
     "tags": (
         "episode_id VARCHAR, run_fingerprint VARCHAR, check_name VARCHAR, "
         "tag VARCHAR, recorded_at TIMESTAMPTZ"
@@ -99,7 +106,7 @@ _DEPENDENT_TABLE_NAMES = tuple(name for name in TABLE_COLUMN_DDL if name != "epi
 # keyed by (location, file_stem). Once aligned a stem can never go stale
 # again -- the episodes file is immutable and every post-commit dependent
 # write carries its recorded_at -- so replays skip straight back to the
-# single existence check instead of re-reading five files every time.
+# single existence check instead of re-reading every dependent file each time.
 _reconciled_append_stems: set[tuple[str, str]] = set()
 
 _FORMAT_MARKER_NAME = "format_version"
@@ -189,6 +196,7 @@ class CheckRunRow:
     duration_s: float
     error: str | None = None
     measurements: dict[str, MeasurementValue] = field(default_factory=dict)
+    observations: list[Observation] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     intervals: list[Interval] = field(default_factory=list)
 
@@ -212,6 +220,7 @@ class CheckRunRow:
             duration_s=duration_s,
             error=error,
             measurements=dict(result.measurements) if result is not None else {},
+            observations=list(result.observations) if result is not None else [],
             tags=list(result.tags) if result is not None else [],
             intervals=list(result.intervals) if result is not None else [],
         )
@@ -352,28 +361,50 @@ def _normalized_measurements(
     the values, so one np.float32(0.4) and float(0.4) outcome fingerprints
     and stores identically instead of splitting into two runs.
     """
+    return _normalized_scalar_values(
+        owner_description=f"check {check_name!r}",
+        values=measurements,
+        key_kind="measurement",
+        empty_key_explanation=(
+            "an empty key becomes a wide-view column named after the SQL that made it"
+        ),
+    )
+
+
+def _normalized_scalar_values(
+    *,
+    owner_description: str,
+    values: dict[str, MeasurementValue],
+    key_kind: str,
+    empty_key_explanation: str,
+) -> dict[str, MeasurementValue]:
+    """Normalize the typed scalar map shared by measurements and observations."""
     normalized: dict[str, MeasurementValue] = {}
-    for key, value in measurements.items():
+    for key, value in values.items():
         # Before the value checks: the key is wrong independently of what it
         # holds, and reporting the value first would send a check author to
         # fix a NaN only to hit the real problem on the next run.
+        if not isinstance(key, str):
+            raise ValueError(
+                f"{owner_description} set a {key_kind} key as {type(key).__name__}: "
+                f"{key_kind} keys must be strings"
+            )
         if not key.strip():
             raise ValueError(
-                f"check {check_name!r} measured {key!r}: measurement keys must "
-                "not be empty or whitespace-only (an empty key becomes a "
-                "wide-view column named after the SQL that made it)"
+                f"{owner_description} set {key!r} as a {key_kind} key: {key_kind} keys "
+                f"must not be empty or whitespace-only ({empty_key_explanation})"
             )
         if isinstance(value, np.generic):
             value = value.item()
         if not isinstance(value, MeasurementValue):
             raise ValueError(
-                f"check {check_name!r} measured {key!r} as {type(value).__name__}: "
-                "measurements hold one int/float/str/bool per key"
+                f"{owner_description} set {key_kind} {key!r} as {type(value).__name__}: "
+                f"{key_kind} values hold one int/float/str/bool per key"
             )
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError(
-                f"check {check_name!r} measured {key!r} as {value!r}: "
-                "omit the key when a check has no finite value for this episode"
+                f"{owner_description} set {key_kind} {key!r} as {value!r}: "
+                "omit the key when there is no finite value"
             )
         normalized[key] = value
     return normalized
@@ -427,6 +458,73 @@ def _normalized_intervals(check_name: str, intervals: list[Interval]) -> list[In
     return normalized
 
 
+def _normalized_observations(check_name: str, observations: list[Observation]) -> list[Observation]:
+    """Normalize scalar fields and enforce an unambiguous per-check identity."""
+    normalized: list[Observation] = []
+    seen_observation_ids: set[str] = set()
+    for observation in observations:
+        if not isinstance(observation, Observation):
+            raise ValueError(
+                f"check {check_name!r} emitted an observation as "
+                f"{type(observation).__name__}: observations must be hflow.Observation values"
+            )
+        observation_id = observation.observation_id
+        if not isinstance(observation_id, str):
+            raise ValueError(
+                f"check {check_name!r} set an observation id as "
+                f"{type(observation_id).__name__}: observation ids must be strings"
+            )
+        if not observation_id.strip():
+            raise ValueError(
+                f"check {check_name!r} set an empty observation id: observation ids "
+                "must be non-empty and stable within the check"
+            )
+        if observation_id != observation_id.strip():
+            raise ValueError(
+                f"check {check_name!r} set observation id {observation_id!r} with leading "
+                "or trailing whitespace: observation ids are stored verbatim"
+            )
+        if observation_id in seen_observation_ids:
+            raise ValueError(
+                f"check {check_name!r} emitted duplicate observation id "
+                f"{observation_id!r}: ids must be unique within one check result"
+            )
+        seen_observation_ids.add(observation_id)
+
+        timestamp_ns = observation.timestamp_ns
+        if isinstance(timestamp_ns, np.generic):
+            timestamp_ns = timestamp_ns.item()
+        if not isinstance(timestamp_ns, int) or isinstance(timestamp_ns, bool):
+            raise ValueError(
+                f"check {check_name!r} observation {observation_id!r} set timestamp_ns "
+                f"as {type(timestamp_ns).__name__}: observation timestamps are int nanoseconds"
+            )
+        if timestamp_ns < 0:
+            raise ValueError(
+                f"check {check_name!r} observation {observation_id!r} set negative "
+                f"timestamp_ns={timestamp_ns}: timestamps are non-negative nanoseconds"
+            )
+        values = _normalized_scalar_values(
+            owner_description=f"check {check_name!r} observation {observation_id!r}",
+            values=observation.values,
+            key_kind="observation field",
+            empty_key_explanation="an unnamed field cannot be queried",
+        )
+        if not values:
+            raise ValueError(
+                f"check {check_name!r} observation {observation_id!r} has no values: "
+                "omit empty observations"
+            )
+        normalized.append(
+            Observation(
+                observation_id=observation_id,
+                timestamp_ns=timestamp_ns,
+                values=values,
+            )
+        )
+    return normalized
+
+
 def _raise_if_measurement_keys_shadow_episode_columns(
     check_rows: Sequence[CheckRunRow],
 ) -> None:
@@ -468,8 +566,9 @@ def _run_fingerprint(
     identity so a successful retry after a transient error is preserved,
     while replaying the exact same result remains a no-op.
     """
-    check_outcomes = [
-        {
+    check_outcomes: list[dict[str, object]] = []
+    for row in check_rows:
+        check_outcome: dict[str, object] = {
             "check_name": row.check_name,
             "check_version": row.check_version,
             "critical": row.critical,
@@ -481,8 +580,19 @@ def _run_fingerprint(
                 (interval.start_ns, interval.end_ns, interval.label) for interval in row.intervals
             ),
         }
-        for row in check_rows
-    ]
+        # Preserve the pre-observation fingerprint for every existing check
+        # that emits none. Adding a compatible catalog feature must not make
+        # an otherwise identical replay append a duplicate of old evidence.
+        if row.observations:
+            check_outcome["observations"] = sorted(
+                (
+                    observation.observation_id,
+                    observation.timestamp_ns,
+                    observation.values,
+                )
+                for observation in row.observations
+            )
+        check_outcomes.append(check_outcome)
     check_outcomes.sort(
         key=lambda outcome: json.dumps(outcome, sort_keys=True, separators=(",", ":"))
     )
@@ -552,6 +662,31 @@ def _insert_dependent_rows(
                     recorded_at,
                 ],
             )
+        for observation in row.observations:
+            for key, value in observation.values.items():
+                value_double = (
+                    float(value)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool)
+                    else None
+                )
+                value_text = value if isinstance(value, str) else None
+                value_bool = value if isinstance(value, bool) else None
+                connection.execute(
+                    "INSERT INTO observations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        episode_id,
+                        run_fingerprint,
+                        row.check_name,
+                        row.check_version,
+                        observation.observation_id,
+                        observation.timestamp_ns,
+                        key,
+                        value_double,
+                        value_text,
+                        value_bool,
+                        recorded_at,
+                    ],
+                )
         for tag in row.tags:
             connection.execute(
                 "INSERT INTO tags VALUES (?, ?, ?, ?, ?)",
@@ -678,6 +813,7 @@ class Catalog:
             replace(
                 row,
                 measurements=_normalized_measurements(row.check_name, row.measurements),
+                observations=_normalized_observations(row.check_name, row.observations),
                 intervals=_normalized_intervals(row.check_name, row.intervals),
             )
             for row in check_rows
@@ -836,7 +972,7 @@ class Catalog:
         converge instead of fighting.
 
         Verified stems are memoized per process: the steady-state replay
-        (the idempotent-dedupe hot path) pays this pass's five file reads at
+        (the idempotent-dedupe hot path) pays this pass's dependent file reads at
         most once, then returns to the single existence check.
         """
         memo_key = (str(self.location), file_stem)

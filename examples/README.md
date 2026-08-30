@@ -115,7 +115,24 @@ ffmpeg, and an OpenAI-compatible vision endpoint. Dataset downloads consume
 local disk, and model calls send selected images to the configured endpoint and
 may incur charges.
 
-First calculate labels without calling a model:
+Apply the methodology to one annotated episode as an HFlow check:
+
+```bash
+export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
+export OPENAI_MODEL="google/gemma-4-26b-a4b-it"
+export EGOSUITE_API_KEY_ENV="OPENROUTER_API_KEY"
+uv run --project examples/egosuite_evaluation \
+    python -m examples.egosuite_evaluation.pipeline path/to/annotated-episode.mcap
+```
+
+The pipeline records reference and predicted class counts, output validity,
+agreement, token usage, and timestamped disagreement intervals as one HFlow
+check result. It defaults to ten one-per-second frames per episode; all
+sampling and endpoint settings are configurable through `EGOSUITE_*`
+environment variables.
+
+The companion Inspect adapter is for dataset-level model comparisons. First
+calculate labels without calling a model:
 
 ```bash
 uv run --project examples/egosuite_evaluation \
@@ -146,7 +163,8 @@ constructed class proportions as the dataset's natural distribution.
 Guide, download command, label contract, and interpretation:
 [Evaluate VLM hand counts against EgoSuite joint labels](../docs/how-to/run-egosuite-hand-evaluation.md)
 
-Code: [`egosuite_evaluation/evaluate.py`](./egosuite_evaluation/evaluate.py)
+- HFlow pipeline: [`egosuite_evaluation/pipeline.py`](./egosuite_evaluation/pipeline.py)
+- Evaluation adapter: [`egosuite_evaluation/evaluate.py`](./egosuite_evaluation/evaluate.py)
 
 ## Egocentric factory corpus
 

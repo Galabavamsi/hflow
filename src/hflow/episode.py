@@ -11,12 +11,13 @@ Decoding happens here, above the batch reader seam: CDR via
 standard library.
 """
 
+import hashlib
 import json
 import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
@@ -33,7 +34,13 @@ from hflow.format import (
     METADATA_RECORD_EPISODE,
     METADATA_RECORD_PROVENANCE,
 )
-from hflow.reader import EpisodeReader, TopicInfo, open_reader
+from hflow.reader import (
+    DEFAULT_BATCH_MAX_BYTES,
+    DEFAULT_BATCH_MAX_MESSAGES,
+    EpisodeReader,
+    TopicInfo,
+    open_reader,
+)
 
 if TYPE_CHECKING:
     import pyarrow
@@ -49,8 +56,44 @@ class ExtractedFrame:
     log_time_ns: int
 
 
+@dataclass(frozen=True)
+class DecodedMessageBatch:
+    """Decoded messages from one episode channel, with aligned timestamps."""
+
+    topic: str
+    channel_id: int
+    log_times: np.ndarray
+    publish_times: np.ndarray
+    messages: list[Any]
+
+    def __len__(self) -> int:
+        return len(self.messages)
+
+
 def _sanitize_topic(topic: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", topic.strip("/")) or "root"
+
+
+def _frame_selection_expression(frame_indices: Sequence[int]) -> str:
+    """Build a compact ffmpeg select expression for sorted, unique indices."""
+
+    consecutive_ranges: list[tuple[int, int]] = []
+    range_start = frame_indices[0]
+    range_end = range_start
+    for frame_index in frame_indices[1:]:
+        if frame_index == range_end + 1:
+            range_end = frame_index
+            continue
+        consecutive_ranges.append((range_start, range_end))
+        range_start = frame_index
+        range_end = frame_index
+    consecutive_ranges.append((range_start, range_end))
+    return "+".join(
+        f"eq(n\\,{range_start})"
+        if range_start == range_end
+        else f"between(n\\,{range_start}\\,{range_end})"
+        for range_start, range_end in consecutive_ranges
+    )
 
 
 def _message_field_names(message: Any) -> list[str]:
@@ -399,6 +442,55 @@ class Episode:
         self._channel_data_by_id[info.channel_id] = data
         return data
 
+    def iter_decoded_batches(
+        self,
+        topics: Sequence[str] | None = None,
+        start_ns: int | None = None,
+        end_ns: int | None = None,
+        *,
+        channel_ids: Sequence[int] | None = None,
+        batch_max_messages: int = DEFAULT_BATCH_MAX_MESSAGES,
+        batch_max_bytes: int = DEFAULT_BATCH_MAX_BYTES,
+    ) -> Iterator[DecodedMessageBatch]:
+        """Stream decoded, per-channel batches from several topics in one pass.
+
+        Topic and channel filters have the same intersecting semantics as
+        :meth:`hflow.EpisodeReader.iter_batches`. Batches and messages within
+        each channel are ordered by log time; no ordering is promised across
+        channels. This is the bounded-memory alternative to materializing
+        several complete :meth:`channel` results.
+        """
+
+        decoder_by_channel_id: dict[int, RawDecoder] = {}
+        for batch in self._reader.iter_batches(
+            topics=topics,
+            start_ns=start_ns,
+            end_ns=end_ns,
+            channel_ids=channel_ids,
+            batch_max_messages=batch_max_messages,
+            batch_max_bytes=batch_max_bytes,
+        ):
+            channel_info = self.channels[batch.channel_id]
+            decoder = decoder_by_channel_id.get(batch.channel_id)
+            if decoder is None:
+                decoder = self._decoder_for(channel_info)
+                if decoder is None:
+                    raise ValueError(
+                        f"no decoder for topic {channel_info.topic!r} "
+                        f"(message_encoding={channel_info.message_encoding!r}, "
+                        f"schema_encoding={channel_info.schema_encoding!r}). "
+                        "Supported encodings: cdr (ros2msg), protobuf, json. "
+                        "Use EpisodeReader.iter_batches() when raw bytes are required."
+                    )
+                decoder_by_channel_id[batch.channel_id] = decoder
+            yield DecodedMessageBatch(
+                topic=batch.topic,
+                channel_id=batch.channel_id,
+                log_times=batch.log_times,
+                publish_times=batch.publish_times,
+                messages=[decoder(payload) for payload in batch.data],
+            )
+
     def _resolve_camera(self, camera: str | None) -> str:
         cameras = self.cameras
         if not cameras:
@@ -515,4 +607,110 @@ class Episode:
         return [
             ExtractedFrame(path=frame_path, log_time_ns=log_time_ns)
             for frame_path, log_time_ns in zip(frame_paths, log_times_ns, strict=True)
+        ]
+
+    def frames_at_indices(
+        self,
+        camera: str | None = None,
+        *,
+        frame_indices: Sequence[int],
+    ) -> list[ExtractedFrame]:
+        """Extract JPEGs at exact, ascending source-message frame indices.
+
+        This accessor is intended for labeled datasets whose annotations refer
+        to source frame numbers rather than a sampling rate. Indices must be
+        unique and ascending so returned paths and source log times have an
+        unambiguous one-to-one order.
+        """
+
+        selected_frame_indices = list(frame_indices)
+        if any(isinstance(frame_index, bool) for frame_index in selected_frame_indices):
+            raise ValueError("frame indices must be integers, not booleans")
+        if any(not isinstance(frame_index, int) for frame_index in selected_frame_indices):
+            raise ValueError("frame indices must be integers")
+        if selected_frame_indices != sorted(set(selected_frame_indices)):
+            raise ValueError("frame indices must be unique and ascending")
+        if selected_frame_indices and selected_frame_indices[0] < 0:
+            raise ValueError("frame indices must be nonnegative")
+
+        topic = self._resolve_camera(camera)
+        if not selected_frame_indices:
+            return []
+        camera_channel = self.channel(topic)
+        final_frame_index = selected_frame_indices[-1]
+        if final_frame_index >= len(camera_channel):
+            raise IndexError(
+                f"frame index {final_frame_index} is outside camera {topic!r}, "
+                f"which contains {len(camera_channel)} frames"
+            )
+
+        mp4_path = self.video(topic)
+        serialized_indices = ",".join(str(frame_index) for frame_index in selected_frame_indices)
+        selection_digest = hashlib.sha256(serialized_indices.encode()).hexdigest()[:16]
+        output_directory = self.workdir / (
+            f"frames_{_sanitize_topic(topic)}_indices_{selection_digest}_"
+            f"count_{len(selected_frame_indices)}"
+        )
+        expected_frame_paths = [
+            output_directory / f"frame_{output_index:06d}.jpg"
+            for output_index in range(len(selected_frame_indices))
+        ]
+        if not all(frame_path.is_file() for frame_path in expected_frame_paths):
+            if output_directory.exists():
+                shutil.rmtree(output_directory)
+            staging_directory = output_directory.with_name(f"{output_directory.name}.tmp")
+            if staging_directory.exists():
+                shutil.rmtree(staging_directory)
+            staging_directory.mkdir(parents=True)
+            filter_script_path = staging_directory / "select.filter"
+            selection_expression = _frame_selection_expression(selected_frame_indices)
+            filter_script_path.write_text(f"select={selection_expression}")
+            command = [
+                str(ffmpeg_path()),
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(mp4_path),
+                "-filter_script:v",
+                str(filter_script_path),
+                "-fps_mode",
+                "vfr",
+                "-frames:v",
+                str(len(selected_frame_indices)),
+                "-q:v",
+                "2",
+                "-start_number",
+                "0",
+                str(staging_directory / "frame_%06d.jpg"),
+            ]
+            completed_process = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            staged_frame_paths = sorted(staging_directory.glob("frame_*.jpg"))
+            if completed_process.returncode != 0 or len(staged_frame_paths) != len(
+                selected_frame_indices
+            ):
+                stderr_tail = completed_process.stderr.strip().splitlines()[-5:]
+                shutil.rmtree(staging_directory)
+                raise RuntimeError(
+                    f"ffmpeg extracted {len(staged_frame_paths)} of "
+                    f"{len(selected_frame_indices)} selected frames from {topic!r} "
+                    f"(exit {completed_process.returncode}): {stderr_tail}"
+                )
+            filter_script_path.unlink()
+            staging_directory.replace(output_directory)
+
+        return [
+            ExtractedFrame(
+                path=frame_path,
+                log_time_ns=int(camera_channel.timestamps[frame_index]),
+            )
+            for frame_index, frame_path in zip(
+                selected_frame_indices, expected_frame_paths, strict=True
+            )
         ]

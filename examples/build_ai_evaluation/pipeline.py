@@ -33,6 +33,7 @@ from examples.build_ai_evaluation.judgment import (  # noqa: E402
     evaluate_image_with_model,
     image_file_data_url,
     load_task_definitions,
+    model_output_check_result,
 )
 
 VISION_ENDPOINT_ALIAS = "vision"
@@ -155,7 +156,7 @@ def _client_for_current_thread() -> Any:
     return _client_by_thread.client
 
 
-def _selected_frame_data_url(episode: hflow.Episode) -> str:
+def _selected_frame(episode: hflow.Episode) -> hflow.ExtractedFrame:
     frame_time_seconds = pipeline_configuration.frame_time_seconds
     extracted_frames = episode.frames(
         pipeline_configuration.camera,
@@ -168,20 +169,27 @@ def _selected_frame_data_url(episode: hflow.Episode) -> str:
             f"episode has no frame at {frame_time_seconds:g} seconds for camera "
             f"{pipeline_configuration.camera!r}"
         )
-    return image_file_data_url(extracted_frames[0].path)
+    return extracted_frames[0]
 
 
 def _evaluate_episode_task(episode: hflow.Episode, task: EvaluationTask) -> hflow.CheckResult:
+    selected_frame = _selected_frame(episode)
     outcome = evaluate_image_with_model(
         client=_client_for_current_thread(),
         model=pipeline_configuration.model,
         task_definition=pipeline_configuration.task_definitions[task],
-        image_data_url=_selected_frame_data_url(episode),
+        image_data_url=image_file_data_url(selected_frame.path),
         response_format=pipeline_configuration.response_format,
         temperature=pipeline_configuration.temperature,
         max_tokens=pipeline_configuration.max_tokens,
     )
-    return outcome.check_result
+    return model_output_check_result(
+        task=task,
+        requested_model=pipeline_configuration.model,
+        outcome=outcome,
+        observation_id=f"frame:{selected_frame.log_time_ns}",
+        timestamp_ns=selected_frame.log_time_ns,
+    )
 
 
 @app.check(

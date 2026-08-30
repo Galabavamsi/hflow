@@ -29,6 +29,7 @@ DATASET_SNAPSHOT_FORMAT_VERSION = "1"
 
 _SAMPLES_TABLE_FILE_NAME = "samples.parquet"
 _MEASUREMENTS_TABLE_FILE_NAME = "measurements.parquet"
+_OBSERVATIONS_TABLE_FILE_NAME = "observations.parquet"
 _MEDIA_TABLE_FILE_NAME = "media.parquet"
 _CHECK_RUNS_TABLE_FILE_NAME = "check_runs.parquet"
 _TAGS_TABLE_FILE_NAME = "tags.parquet"
@@ -70,6 +71,7 @@ class DatasetSnapshotReport:
     output_directory: Path
     episode_count: int
     measurement_count: int
+    observation_count: int
     media_count: int
     copied_media_count: int
     check_run_count: int
@@ -82,6 +84,7 @@ class DatasetSnapshotReport:
         completed_summary = (
             f"dataset snapshot: {self.output_directory} "
             f"({self.episode_count} episodes, {self.measurement_count} measurements, "
+            f"{self.observation_count} observation fields, "
             f"{self.media_count} media references, {self.copied_media_count} media files copied, "
             f"{self.tag_count} tags, {self.interval_count} intervals)"
         )
@@ -610,6 +613,17 @@ def export_dataset_snapshot(
                 """,
                 staging_directory / _MEASUREMENTS_TABLE_FILE_NAME,
             )
+            observation_count = _copy_query_to_parquet(
+                connection,
+                """
+                SELECT observations.*
+                FROM observations_latest observations
+                JOIN snapshot_selected_episode_ids selected USING (episode_id)
+                ORDER BY observations.episode_id, observations.check_name,
+                         observations.observation_id, observations.key
+                """,
+                staging_directory / _OBSERVATIONS_TABLE_FILE_NAME,
+            )
             media_count, copied_media_count = _write_media_table(
                 connection, staging_directory, resolved_media_mode
             )
@@ -659,6 +673,7 @@ def export_dataset_snapshot(
             "tables": {
                 "samples": _SAMPLES_TABLE_FILE_NAME,
                 "measurements": _MEASUREMENTS_TABLE_FILE_NAME,
+                "observations": _OBSERVATIONS_TABLE_FILE_NAME,
                 "media": _MEDIA_TABLE_FILE_NAME,
                 "check_runs": _CHECK_RUNS_TABLE_FILE_NAME,
                 "tags": _TAGS_TABLE_FILE_NAME,
@@ -679,6 +694,7 @@ def export_dataset_snapshot(
         output_directory=resolved_output_directory,
         episode_count=episode_count,
         measurement_count=measurement_count,
+        observation_count=observation_count,
         media_count=media_count,
         copied_media_count=copied_media_count,
         check_run_count=check_run_count,
