@@ -267,8 +267,8 @@ def test_the_egocentric_example_renders_a_sheet_on_a_multi_camera_episode(
     canonical = tmp_path / "canonical.mcap"
     write_canonical_episode(raw, canonical)
 
-    application = hflow.import_pipeline_application(str(_EGOCENTRIC_PIPELINE))
-    report = application.test(canonical, verbose=False)
+    pipeline_application = hflow.import_pipeline_application(f"{_EGOCENTRIC_PIPELINE}:pipeline")
+    report = pipeline_application.test(canonical, verbose=False)
 
     sheet_run = next(run for run in report.enrichments if run.enrichment.name == "contact_sheet")
     assert sheet_run.status is hflow.CheckStatus.MEASURED, sheet_run.error

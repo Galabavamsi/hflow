@@ -94,7 +94,7 @@ uses):
 
 ```bash
 uv run hflow up \
-  --pipeline examples/egocentric/pipeline.py:app \
+  --pipeline examples/egocentric/pipeline.py:pipeline \
   --data-root data/egocentric
 
 # episode URIs are data-root-relative, so trigger from the data root

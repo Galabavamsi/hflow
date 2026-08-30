@@ -2,7 +2,7 @@
 
 One file serves both entry points: ``python pipeline.py <episodes>`` runs the
 checks in-process for the dev loop, and ``hflow up --pipeline
-examples/egocentric/pipeline.py:app`` runs the identical App under Airflow.
+examples/egocentric/pipeline.py:pipeline`` runs the same pipeline under Airflow.
 """
 
 import sys
@@ -22,15 +22,15 @@ from hflow.checks import timestamp_regularity as measure_timestamp_regularity
 CONTAINER_DATA_ROOT = Path("/opt/airflow/data")
 DATA_ROOT = CONTAINER_DATA_ROOT if CONTAINER_DATA_ROOT.is_dir() else Path("data/egocentric")
 
-app = hflow.App("egocentric", data_root=DATA_ROOT)
+pipeline = hflow.App("egocentric", data_root=DATA_ROOT)
 
 
-@app.check(version="1")
+@pipeline.check(version="1")
 def timestamp_regularity(episode: hflow.Episode) -> hflow.CheckResult:
     return measure_timestamp_regularity(episode, expected_hz={episode.cameras[0]: 10.0})
 
 
-@app.check(version="1", critical=True)
+@pipeline.check(version="1", critical=True)
 def camera_health(episode: hflow.Episode) -> hflow.CheckResult:
     camera_topic = episode.cameras[0]
     camera_evidence = measure_camera_frame_stats(episode, cameras=[camera_topic])
@@ -59,7 +59,7 @@ def camera_health(episode: hflow.Episode) -> hflow.CheckResult:
     )
 
 
-@app.enrich(version="1")
+@pipeline.enrich(version="1")
 def contact_sheet(episode: hflow.Episode) -> hflow.EnrichmentResult:
     # episode.cameras is sorted, so this is the alphabetically first camera and
     # not necessarily the one the recorder considered primary. Recorded in the
@@ -86,7 +86,7 @@ def main() -> None:
     if len(sys.argv) < 2:
         raise SystemExit(f"usage: {Path(sys.argv[0]).name} <episode.mcap> [episode.mcap ...]")
     for episode_path in map(Path, sys.argv[1:]):
-        app.test(episode_path, record=True)
+        pipeline.test(episode_path, record=True)
 
 
 if __name__ == "__main__":
