@@ -107,8 +107,10 @@ No. HFlow ends at canonical, quality-tagged, version-stamped episodes and a
 curated manifest. Training loops, policy implementations, and model-specific
 dataloaders are outside this repository.
 
-A downstream converter to a training-oriented format such as LeRobot may be a
-separate package; HFlow's core boundaries remain MCAP and Parquet.
+HFlow can import a supported subset of LeRobot Dataset v3 into canonical MCAP
+with `hflow import lerobot`. It does not export a curated HFlow selection back
+to LeRobot or run LeRobot training; HFlow's processing and curation boundaries
+remain MCAP and Parquet.
 
 ## How does HFlow relate to Dyna Robotics' article?
 

@@ -37,6 +37,19 @@ Put stable episode semantics such as task, operator, success, embodiment, and ro
 
 ## Follow the LeRobot example
 
-[`examples/lerobot/prepare.py`](../../examples/lerobot/prepare.py) demonstrates the boundary: it opens a standard MCAP writer, registers schemas and channels, writes timestamped messages and source metadata, finishes the source file, and then calls `hflow.write_canonical_episode`. That sequence is the reusable converter pattern.
+HFlow's first-party
+[`hflow.importers.lerobot`](../../src/hflow/importers/lerobot.py) implementation
+demonstrates the boundary: it opens a standard MCAP writer, registers schemas
+and channels, writes timestamped messages and source metadata, finishes the
+source file, and then calls `hflow.write_canonical_episode`. That sequence is
+the reusable converter pattern. The runnable
+[`examples/lerobot/prepare.py`](../../examples/lerobot/prepare.py) wrapper calls
+the same `hflow import lerobot` command users install with HFlow.
 
-Its Hugging Face download, Parquet column mapping, Pusht state and action schemas, topic names, metadata values, and video timestamp checks are specific to that dataset. It also arrives with encoded H.264, so it prepares a pass-through video stream that already meets the constraints above. A converter whose source contains JPEG or PNG frames can write `CompressedImage` messages instead and leave H.264 encoding, GOP structure, grouping, chunk sizing, and canonical provenance to HFlow.
+Its Hugging Face download, LeRobot v3 Parquet mapping, topic names, metadata
+values, and video timestamp checks belong to that source format. It also
+arrives with encoded video, so the importer prepares a pass-through H.264
+stream that already meets the constraints above. A converter whose source
+contains JPEG or PNG frames can write `CompressedImage` messages instead and
+leave H.264 encoding, GOP structure, grouping, chunk sizing, and canonical
+provenance to HFlow.

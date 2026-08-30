@@ -1,7 +1,7 @@
 """Command-line entry point.
 
-Subcommands: ``curate``, ``dataset create``, ``export snapshot``, ``stale``,
-``doctor``, ``manifest``, the Compose runtime family
+Subcommands: ``curate``, ``dataset create``, ``import lerobot``,
+``export snapshot``, ``stale``, ``doctor``, ``manifest``, the Compose runtime family
 ``up``/``down``/``ingest``/``status``, ``deploy`` for bring-your-own Airflow,
 and ``serve`` for the workspace HTTP server (a separate ``hflow-server``
 package, imported only when invoked).
@@ -223,6 +223,57 @@ def _build_parser() -> argparse.ArgumentParser:
         "--print-sql",
         action="store_true",
         help="print the SQL this would run and exit, writing nothing",
+    )
+
+    import_parser = subparsers.add_parser(
+        "import",
+        help="import supported robotics datasets as canonical MCAP episodes",
+        description=(
+            "Group commands that import supported source datasets into HFlow's "
+            "canonical MCAP episode boundary."
+        ),
+    )
+    import_subparsers = import_parser.add_subparsers(dest="import_command", required=True)
+    lerobot_import_parser = import_subparsers.add_parser(
+        "lerobot",
+        help="import a Hugging Face LeRobot Dataset v3 repository",
+        description=(
+            "Import LeRobot Dataset v3 video cameras and fixed-width float32 "
+            "state/action vectors as canonical MCAP episodes. The source revision "
+            "is resolved to an immutable commit and recorded as provenance."
+        ),
+    )
+    lerobot_import_parser.add_argument(
+        "--repo",
+        required=True,
+        help="Hugging Face dataset repository, for example lerobot/pusht",
+    )
+    lerobot_import_parser.add_argument(
+        "--revision",
+        default="main",
+        help="branch, tag, or commit to resolve (default: main)",
+    )
+    lerobot_import_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="local destination; episodes are written under its landing/ directory",
+    )
+    lerobot_import_parser.add_argument(
+        "--camera",
+        "--camera-key",
+        dest="camera_keys",
+        action="append",
+        help=(
+            "video feature to import; repeat for multiple cameras (default: "
+            "observation.image; comma-separated values are also accepted)"
+        ),
+    )
+    lerobot_import_parser.add_argument(
+        "--episode-index",
+        type=int,
+        default=None,
+        help="zero-based episode index to import (default: every episode)",
     )
 
     export_parser = subparsers.add_parser(
@@ -722,6 +773,25 @@ def _command_dataset_create(arguments: argparse.Namespace) -> int:
         print(f"dataset create: {error}", file=sys.stderr)
         return 2
     print(dataset.summary())
+    return 0
+
+
+def _command_import_lerobot(arguments: argparse.Namespace) -> int:
+    from hflow.importers.lerobot import DEFAULT_CAMERA_KEY, import_lerobot_dataset
+
+    camera_keys = arguments.camera_keys or [DEFAULT_CAMERA_KEY]
+    try:
+        output_paths = import_lerobot_dataset(
+            dataset_repo=arguments.repo,
+            revision=arguments.revision,
+            output_dir=arguments.output_dir,
+            episode_index=arguments.episode_index,
+            camera_keys=camera_keys,
+        )
+    except (ValueError, RuntimeError, OSError) as error:
+        print(f"import lerobot: {error}", file=sys.stderr)
+        return 2
+    print(f"import lerobot: converted {len(output_paths)} episode(s)")
     return 0
 
 
@@ -1259,6 +1329,10 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.dataset_command == "create":
             return _command_dataset_create(arguments)
         raise AssertionError(f"unhandled dataset command {arguments.dataset_command!r}")
+    if arguments.command == "import":
+        if arguments.import_command == "lerobot":
+            return _command_import_lerobot(arguments)
+        raise AssertionError(f"unhandled import command {arguments.import_command!r}")
     if arguments.command == "export":
         if arguments.export_command == "snapshot":
             return _command_export_snapshot(arguments)

@@ -1,24 +1,20 @@
-"""Outcome-focused fixture for the LeRobot v3 converter generalization.
+"""Outcome-focused coverage for first-class LeRobot Dataset v3 import.
 
 These tests exercise the metadata-driven discovery and fail-loud behavior
 with a synthetic v3-style corpus, without asserting third-party
 implementation details or touching the network.
 """
 
-import importlib.util
 import json
-import os
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-_PREPARE_PATH = Path(__file__).resolve().parents[1] / "examples" / "lerobot" / "prepare.py"
-_spec = importlib.util.spec_from_file_location("hflow_lerobot_prepare", _PREPARE_PATH)
-assert _spec and _spec.loader
-prep = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(prep)
+import hflow.importers.lerobot as prep
+from hflow.cli import main as cli_main
+
 _DERIVE = prep._derive_numeric_schema
 _ENCODE = prep._encode_cdr_float32_array
 
@@ -29,7 +25,7 @@ _FFPROBE = shutil.which("ffprobe")
 # the five metadata tests too, and none of those touch ffmpeg at all.
 _requires_system_ffmpeg = pytest.mark.skipif(
     _FFMPEG is None or _FFPROBE is None,
-    reason="system ffmpeg/ffprobe required: prepare.py shells out to bare 'ffmpeg'",
+    reason="system ffmpeg/ffprobe required to construct and inspect the test video",
 )
 
 
@@ -249,15 +245,46 @@ def test_camera_selection_validates_keys(tmp_path: Path, monkeypatch: pytest.Mon
             shutil.copy(str(tmp_path / "data" / "chunk-000" / "file-000.parquet"), dest)
 
     monkeypatch.setattr(prep, "_download_file", fake_dl)
-    monkeypatch.setattr(prep, "_require_ffmpeg", lambda: None)
 
     with pytest.raises(ValueError, match="not found"):
-        prep.lerobot_to_mcap(
+        prep.import_lerobot_dataset(
             dataset_repo="fake/repo",
             revision="abc",
             output_dir=tmp_path / "out",
-            camera_key="observation.nope",
+            camera_keys="observation.nope",
         )
+
+
+def test_import_refuses_invalid_arguments_before_network(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="dataset_repo must not be empty"):
+        prep.import_lerobot_dataset(dataset_repo="", output_dir=tmp_path)
+    with pytest.raises(ValueError, match="revision must not be empty"):
+        prep.import_lerobot_dataset(dataset_repo="lerobot/pusht", revision=" ", output_dir=tmp_path)
+    with pytest.raises(ValueError, match="episode_index must be zero or greater"):
+        prep.import_lerobot_dataset(
+            dataset_repo="lerobot/pusht", episode_index=-1, output_dir=tmp_path
+        )
+    with pytest.raises(ValueError, match="camera_keys must name at least one"):
+        prep.import_lerobot_dataset(
+            dataset_repo="lerobot/pusht", camera_keys=(), output_dir=tmp_path
+        )
+    with pytest.raises(ValueError, match="camera_keys must not contain duplicates"):
+        prep.import_lerobot_dataset(
+            dataset_repo="lerobot/pusht",
+            camera_keys=("observation.image", "observation.image"),
+            output_dir=tmp_path,
+        )
+
+
+def test_cli_routes_lerobot_import_refusals_without_a_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    exit_code = cli_main(["import", "lerobot", "--repo", "", "--output-dir", str(tmp_path)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert captured.out == ""
+    assert captured.err == "import lerobot: dataset_repo must not be empty\n"
 
 
 @_requires_system_ffmpeg
@@ -273,12 +300,10 @@ def test_converter_output_remuxes_without_tail_loss(
     """
 
     assert _FFMPEG is not None and _FFPROBE is not None
-    # prepare.py shells out to bare "ffmpeg"/"ffprobe"; make sure it
-    # resolves to the system binary this test found.
-    monkeypatch.setenv(
-        "PATH",
-        str(Path(_FFMPEG).resolve().parent) + os.pathsep + os.environ.get("PATH", ""),
-    )
+    system_ffmpeg_path = Path(_FFMPEG)
+    system_ffprobe_path = Path(_FFPROBE)
+    monkeypatch.setattr(prep, "ffmpeg_path", lambda: system_ffmpeg_path)
+    monkeypatch.setattr(prep, "ffprobe_path", lambda: system_ffprobe_path)
 
     source = tmp_path / "source.mp4"
     subprocess.run(
@@ -308,7 +333,7 @@ def test_converter_output_remuxes_without_tail_loss(
 
     from hflow.video import write_access_units_to_mp4
 
-    units = prep._transcode_mp4_to_h264(source, gop_seconds=1.0, fps=30.0)
+    units = prep._transcode_mp4_to_h264(source, gop_seconds=1.0, frames_per_second=30.0)
     muxed = write_access_units_to_mp4(units, fps=30.0, output=tmp_path / "remux.mp4")
 
     probe = subprocess.run(

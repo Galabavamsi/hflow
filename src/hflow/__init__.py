@@ -31,6 +31,7 @@ from hflow.curation import (
 from hflow.doctor import DiagnosticLevel, DoctorReport, Finding, diagnose
 from hflow.episode import ChannelData, Episode, ExtractedFrame
 from hflow.format import GopPreset
+from hflow.importers import import_lerobot_dataset
 from hflow.manifest import (
     DerivedChannelManifest,
     PipelineManifest,
@@ -158,6 +159,7 @@ __all__ = [
     "export_dataset_snapshot",
     "fetch_uri",
     "ffmpeg",
+    "import_lerobot_dataset",
     "import_pipeline_application",
     "is_bucket_url",
     "open_catalog_connection",

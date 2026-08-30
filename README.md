@@ -56,7 +56,7 @@ episode.
 
 | | HFlow's boundary |
 | --- | --- |
-| **Input** | One multimodal episode per supported standard MCAP file (`hflow doctor` reports canonical gaps) |
+| **Input** | Supported standard MCAP episodes directly; LeRobot Dataset v3 repositories through `hflow import lerobot` |
 | **Processing** | Your Python transforms, checks, labels, and enrichments |
 | **Execution** | In-process for development; generated Airflow 3 DAGs for scheduled runs |
 | **Durable output** | Canonical MCAP episodes, provenance, artifacts, and a Parquet catalog |
@@ -147,6 +147,19 @@ and contributors should start with [CONTRIBUTING.md](https://github.com/Hebbian-
 the [examples catalog](https://github.com/Hebbian-Robotics/hflow/blob/main/examples/README.md) for the egocentric-corpus and
 OpenAI vision paths.
 
+To import a LeRobot Dataset v3 episode into the same canonical MCAP boundary:
+
+```bash
+uv run hflow import lerobot \
+  --repo lerobot/pusht --revision main \
+  --camera observation.image --episode-index 0 \
+  --output-dir ./data/lerobot_pusht
+```
+
+The importer resolves `main` to an immutable source commit and records it as
+episode provenance. See the [LeRobot import guide](./docs/how-to/import-lerobot-v3.md)
+for the supported feature subset and a multi-camera example.
+
 ## What it looks like
 
 Get started in six lines of code. This fuller example uses a robot
@@ -201,18 +214,12 @@ WHERE task = 'fold_napkin'
   AND pipeline_version = 'a41c9f27b3d8'    -- pin one reprocessing generation
 ```
 
-## Design tenets
+## Design principles
 
 1. **Democratize the architecture, defer the optimizations.** Preserve the useful workflow and standard interfaces at small scale, and label each production-scale mechanism honestly as implemented, simplified, deferred, or out of scope.
 2. **Evidence, not verdicts.** Checks record measurements with coverage; pass/fail policy belongs to the consumer, at curation time. Quality tags route episodes; they never delete data.
 3. **Standard formats at every boundary.** MCAP episodes, Parquet catalogs, Airflow DAGs. Our code exists only where the format forces bridging or a pitfall is genuinely non-obvious.
 4. **Your code stays your code.** Existing transforms, checks, and enrichments plug in through small adapters instead of being rewritten.
-
-## Non-goals
-
-- **Training.** The pipeline ends at curated, quality-tagged, version-stamped episodes and a manifest. Many users filter data to deliver or sell it, not to train on it. (Converters to training formats such as [LeRobot](https://github.com/huggingface/lerobot) are planned as a separate, standalone package.)
-- **Maximum flexibility.** Robotics/physical-AI data is the narrative and the constraint budget: one canonical episode format, coarse-grained steps, and opinionated defaults are features.
-- **Million-hour throughput.** The [benchmark report](https://github.com/Hebbian-Robotics/hflow/blob/main/docs/BENCHMARKS.md) documents honestly what the simple version achieves and where it falls over.
 
 ## Requirements
 
@@ -245,6 +252,14 @@ WHERE task = 'fold_napkin'
 - [Foxglove](https://foxglove.dev/) and [Rerun](https://rerun.io/)
 - [FFmpeg](https://ffmpeg.org/)
 - [Pareto](https://github.com/Hebbian-Robotics/pareto), Hebbian Robotics' robotics data curation platform.
+
+## Contributing
+
+Thank you to all our contributors for making HFlow awesome! See [CONTRIBUTING.md](https://github.com/Hebbian-Robotics/hflow/blob/main/CONTRIBUTING.md) to join our community.
+
+<a href="https://github.com/Hebbian-Robotics/hflow/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=Hebbian-Robotics/hflow&max=48&columns=12" alt="HFlow contributors" />
+</a>
 
 ## License
 
