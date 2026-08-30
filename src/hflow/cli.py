@@ -1,6 +1,6 @@
 """Command-line entry point.
 
-Subcommands: ``curate``, ``dataset create``, ``import lerobot``,
+Subcommands: ``curate``, ``catalog ui``, ``dataset create``, ``import lerobot``,
 ``export snapshot``, ``stale``, ``doctor``, ``manifest``, the Compose runtime family
 ``up``/``down``/``ingest``/``status``, ``deploy`` for bring-your-own Airflow,
 and ``serve`` for the workspace HTTP server (a separate ``hflow-server``
@@ -34,6 +34,7 @@ from hflow.app import (
     default_data_root,
     resolve_pipeline_spec_for_rendering,
 )
+from hflow.catalog_ui import DEFAULT_CATALOG_UI_PORT
 from hflow.curation import curate, stale_episodes
 from hflow.doctor import diagnose
 from hflow.project import (
@@ -174,6 +175,46 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="run the query and report row count and coverage without writing a manifest",
+    )
+
+    catalog_parser = subparsers.add_parser(
+        "catalog",
+        help="inspect and explore the Parquet catalog",
+        description=(
+            "Group commands for inspecting and exploring the append-only Parquet "
+            "catalog. Use `ui` to open DuckDB's local browser interface over the "
+            "HFlow views."
+        ),
+    )
+    catalog_subparsers = catalog_parser.add_subparsers(dest="catalog_command", required=True)
+    catalog_ui_parser = catalog_subparsers.add_parser(
+        "ui",
+        help="open DuckDB UI over the local catalog",
+        description=(
+            "Start DuckDB's browser UI over a local HFlow catalog. The UI starts "
+            "even when the catalog is empty, then refreshes its views after the "
+            "first completed append."
+        ),
+    )
+    catalog_ui_parser.add_argument(
+        "--catalog",
+        default=_default_catalog_location(),
+        help=(
+            "local catalog directory "
+            f"(default: $HFLOW_DATA_ROOT, else {PROJECT_CONFIG_FILE_NAME}'s data_root, "
+            f"else {DEFAULT_DATA_ROOT} -- plus /catalog)"
+        ),
+    )
+    catalog_ui_parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_CATALOG_UI_PORT,
+        help=f"local DuckDB UI port (default {DEFAULT_CATALOG_UI_PORT})",
+    )
+    catalog_ui_parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="do not open a browser after starting (headless or remote use)",
     )
 
     dataset_parser = subparsers.add_parser(
@@ -1243,6 +1284,40 @@ def _command_doctor(arguments: argparse.Namespace) -> int:
     return 2 if not diagnosed_any else exit_code
 
 
+def _command_catalog_ui(arguments: argparse.Namespace) -> int:
+    from hflow.catalog_ui import (
+        CatalogUiSettings,
+        CatalogUiStartupError,
+        serve_catalog_ui,
+    )
+
+    if is_bucket_url(arguments.catalog):
+        print(
+            "catalog ui: DuckDB UI currently requires a local catalog directory",
+            file=sys.stderr,
+        )
+        return 2
+
+    local_catalog_root = Path(arguments.catalog)
+    if local_catalog_root.exists() and not local_catalog_root.is_dir():
+        print(
+            f"catalog ui: {os.strerror(errno.ENOTDIR)}: {local_catalog_root}",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        settings = CatalogUiSettings(
+            catalog_root=local_catalog_root,
+            port=arguments.port,
+            open_browser=not arguments.no_browser,
+        )
+        serve_catalog_ui(settings)
+    except (CatalogUiStartupError, OSError, ValueError) as error:
+        print(f"catalog ui: {error}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def _command_serve(arguments: argparse.Namespace) -> int:
     try:
         from hflow_server import ServerSettings, ServerStartupError, serve
@@ -1325,6 +1400,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if arguments.command == "curate":
         return _command_curate(arguments)
+    if arguments.command == "catalog":
+        if arguments.catalog_command == "ui":
+            return _command_catalog_ui(arguments)
+        raise AssertionError(f"unhandled catalog command {arguments.catalog_command!r}")
     if arguments.command == "dataset":
         if arguments.dataset_command == "create":
             return _command_dataset_create(arguments)

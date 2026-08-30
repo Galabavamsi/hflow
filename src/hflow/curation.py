@@ -288,6 +288,23 @@ def _open_connection_over_root(
     catalog's own files stay unreachable for reads and, crucially, writes.
     """
     connection = duckdb.connect()
+    _register_catalog_relations(
+        connection,
+        root,
+        constrained=constrained,
+        writable_directories=writable_directories,
+    )
+    return connection
+
+
+def _register_catalog_relations(
+    connection: duckdb.DuckDBPyConnection,
+    root: Path,
+    *,
+    constrained: bool,
+    writable_directories: Sequence[Path],
+) -> None:
+    """Register every HFlow catalog relation on an existing connection."""
 
     for view_name in _LONG_TABLE_NAMES:
         directory_name = _TABLE_DIRECTORIES[view_name]
@@ -426,7 +443,66 @@ def _open_connection_over_root(
             FROM episodes_latest e
             """
         )
-    return connection
+
+
+def _refresh_local_catalog_connection(
+    connection: duckdb.DuckDBPyConnection, catalog_root: Path
+) -> None:
+    """Replace an empty catalog surface after its first append completes.
+
+    An empty catalog has real in-memory tables because DuckDB cannot define a
+    ``read_parquet`` view over a glob with no matches. Once the episodes file
+    from the first append exists, all dependent table files are complete too:
+    ``Catalog.append_episode`` deliberately writes the episodes file last.
+    Replacing the empty tables with the normal Parquet-backed views in one
+    transaction lets a long-running local explorer see that first run without
+    replacing its DuckDB connection.
+
+    This is intentionally local and unconstrained. Bucket connections have a
+    synced mirror with a separate refresh lifecycle, while constrained
+    connections have locked their configuration and materialized their data.
+    """
+    location = parse_storage_root(catalog_root)
+    if not isinstance(location, LocalStorageRoot):
+        raise ValueError("catalog connection refresh requires a local catalog")
+    _verify_catalog_format(location)
+
+    derived_view_names = (
+        "episodes",
+        "check_runs_latest",
+        "measurements_latest",
+        "episodes_latest",
+    )
+    try:
+        connection.execute("BEGIN TRANSACTION")
+        for view_name in derived_view_names:
+            connection.execute(f"DROP VIEW {view_name}")
+
+        for relation_name in _LONG_TABLE_NAMES:
+            relation_type_row = connection.execute(
+                """
+                SELECT table_type
+                FROM information_schema.tables
+                WHERE table_schema = 'main' AND table_name = ?
+                """,
+                [relation_name],
+            ).fetchone()
+            if relation_type_row is None:
+                raise RuntimeError(f"catalog relation {relation_name!r} is missing")
+            relation_type = str(relation_type_row[0])
+            drop_kind = "VIEW" if relation_type == "VIEW" else "TABLE"
+            connection.execute(f"DROP {drop_kind} {relation_name}")
+
+        _register_catalog_relations(
+            connection,
+            location.path,
+            constrained=False,
+            writable_directories=(),
+        )
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
 
 
 def _reject_non_single_select(sql: str) -> None:

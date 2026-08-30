@@ -20,6 +20,12 @@ from hflow.app import (
 )
 from hflow.batching import PlannedBatch, plan_batches, plan_batches_from_files
 from hflow.catalog import AppendResult, Catalog, CheckRunRow
+from hflow.catalog_ui import (
+    DEFAULT_CATALOG_UI_PORT,
+    CatalogUiSettings,
+    CatalogUiStartupError,
+    serve_catalog_ui,
+)
 from hflow.curation import (
     CheckCoverage,
     CurationReport,
@@ -93,12 +99,15 @@ except PackageNotFoundError:  # running from a source tree without an install
 __all__ = [
     "DATASET_SNAPSHOT_FORMAT_NAME",
     "DATASET_SNAPSHOT_FORMAT_VERSION",
+    "DEFAULT_CATALOG_UI_PORT",
     "RUN_PROFILES",
     "Aggregation",
     "App",
     "AppendResult",
     "BucketStorageRoot",
     "Catalog",
+    "CatalogUiSettings",
+    "CatalogUiStartupError",
     "ChannelData",
     "CheckCoverage",
     "CheckResult",
@@ -168,6 +177,7 @@ __all__ = [
     "plan_batches",
     "plan_batches_from_files",
     "providers",
+    "serve_catalog_ui",
     "stages_for_profile",
     "stale_episodes",
     "testing",

@@ -121,17 +121,23 @@ stages); each DAG's Docs tab explains itself, and each mapped
 
 **DuckDB: the evidence.** Measurement keys are plain columns on the wide
 `episodes` view (helpers and views:
-[catalog guide](../../docs/CATALOG.md)):
+[catalog guide](../../docs/CATALOG.md)). Start the UI before triggering the
+ingest. It opens immediately on the empty catalog and makes the views queryable
+when the first completed append lands:
 
 ```bash
-uv run python -c "
-import hflow
-connection = hflow.open_catalog_connection('data/egocentric/catalog')
-connection.sql('''
-    SELECT episode_id, status, black_frame_pct, freeze_total_s
-    FROM episodes ORDER BY status DESC, episode_id
-''').show()
-"
+uv run hflow catalog ui \
+    --catalog data/egocentric/catalog \
+    --no-browser
+```
+
+Open `http://127.0.0.1:4213` locally, or forward that port when the runtime is
+on a remote machine. Run this SQL in DuckDB UI:
+
+```sql
+SELECT episode_id, status, black_frame_pct, freeze_total_s
+FROM episodes
+ORDER BY status DESC, episode_id;
 ```
 
 The six quarantined rows lead. The three blackouts show `black_frame_pct` ≈ 15;

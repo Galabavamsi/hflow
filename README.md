@@ -84,6 +84,13 @@ collection --> ingestion ---------------> curation ------> delivery
 - **Quality checks produce reusable evidence.** Accessors extract the inputs existing processing code expects (numpy arrays, MP4 paths, JPEG frames), and results land as queryable measurements rather than hardcoded verdicts. Different datasets can apply different thresholds without processing the media again.
 - **Query the corpus without loading the recordings.** Metadata, quality measurements, tags, version stamps, and artifact locations live in the Parquet catalog. [DuckDB](https://duckdb.org/) can answer corpus-wide questions and build manifests without opening the underlying MCAP files.
 
+Open DuckDB's browser over the catalog at any time, including before the first
+run starts:
+
+```bash
+hflow catalog ui
+```
+
 ## Hosting and scale
 
 The open-source deployment is built to be easy to own: run one single-tenant

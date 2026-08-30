@@ -16,6 +16,11 @@ this package. The server ships no frontend of its own; point
 `HFLOW_UI_ASSETS` at a directory containing an `index.html` to serve one, or
 install a wheel that packages assets under `hflow_server/static/`.
 
+For a ready-made SQL browser over a local catalog, use
+[`hflow catalog ui`](./CATALOG.md#explore-in-duckdb-ui). That command launches
+DuckDB UI and can be opened before an ingest begins. It is separate from this
+workspace REST API and is not an HFlow frontend.
+
 It ships as a separate package, `hflow-server`, on purpose: pipeline workers
 install the `hflow` wheel into every task venv, and they should never carry a
 web server. **It is not published to PyPI yet** -- until the first release,

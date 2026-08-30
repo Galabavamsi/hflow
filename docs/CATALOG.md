@@ -86,6 +86,47 @@ rows together.
 
 ## Querying
 
+### Explore in DuckDB UI
+
+Start DuckDB's browser UI over the default local catalog:
+
+```bash
+hflow catalog ui
+```
+
+The command works before the first ingest. It creates the empty catalog root,
+opens the UI at `http://127.0.0.1:4213`, and waits for the first completed
+append. When that append lands, HFlow replaces the empty in-memory relations
+with the normal Parquet-backed views on the same DuckDB connection. The open UI
+can then query `episodes`, `measurements`, `check_runs`, and the other views
+listed below. Start the explorer first, then trigger the runtime in another
+terminal.
+
+Point it at another local catalog or keep it headless with:
+
+```bash
+hflow catalog ui --catalog data/egocentric/catalog
+hflow catalog ui --catalog data/egocentric/catalog --no-browser
+```
+
+DuckDB UI listens on loopback. When HFlow is running on another machine, run
+the second command there and forward the port from your laptop:
+
+```bash
+ssh -N -L 4213:127.0.0.1:4213 user@remote-host
+```
+
+Then open `http://127.0.0.1:4213` on the laptop. The first launch needs network
+access so DuckDB can install its `ui` extension and the browser can load the UI
+assets. DuckDB UI is an unrestricted local SQL explorer, so keep the port on
+loopback and use a tunnel instead of exposing it publicly.
+
+This command is separate from [`hflow serve`](./SERVE.md). `catalog ui` is
+DuckDB's browser over the local catalog. `serve` is HFlow's optional workspace
+REST API and does not ship a browser client.
+
+### Query from Python or the CLI
+
 ```python
 import hflow
 
@@ -476,9 +517,11 @@ itself. A catalog root contains the `format_version` marker.
   appends written before this check keep their renamed ghost columns -- query
   such values in the long `measurements` table.
 - The wide view binds its measurement columns to the keys present when the
-  connection was opened. `curate()` reopens per call, so this only matters
-  if you hold a long-lived connection from `open_catalog_connection()` while
-  new keys are being recorded.
+  connection was opened. `hflow catalog ui` refreshes this surface after an
+  initially empty catalog's first append, and `curate()` reopens per call.
+  If a later run introduces brand-new measurement keys into a long-lived UI
+  or `open_catalog_connection()` session, restart that session to add those
+  columns. New rows for existing keys appear without a restart.
 
 ## See also
 

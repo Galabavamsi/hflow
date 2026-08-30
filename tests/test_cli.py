@@ -33,6 +33,7 @@ def test_runtime_command_help_has_a_description(
 @pytest.mark.parametrize(
     ("command", "expected_description"),
     [
+        ("catalog", "Group commands for inspecting and exploring the append-only"),
         ("dataset", "Group commands that turn the pipeline's policy into version-pinned"),
         ("export", "Group commands for exporting catalog selections in portable downstream"),
         ("serve", "Serve this workspace over HTTP with REST endpoints over the catalog"),
@@ -87,6 +88,8 @@ def test_cli_defaults_follow_the_environment_data_root(
     parser = _build_parser()
     stale_arguments = parser.parse_args(["stale", "--pipeline-version", "abc"])
     assert stale_arguments.catalog == f"{tmp_path / 'workspace'}/catalog"
+    catalog_ui_arguments = parser.parse_args(["catalog", "ui", "--no-browser"])
+    assert catalog_ui_arguments.catalog == f"{tmp_path / 'workspace'}/catalog"
     up_arguments = parser.parse_args(["up", "--pipeline", "p.py"])
     assert up_arguments.data_root == str(tmp_path / "workspace")
 
