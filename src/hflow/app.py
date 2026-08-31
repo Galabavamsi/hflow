@@ -55,6 +55,12 @@ from hflow.manifest import (
 )
 from hflow.reader import open_reader
 from hflow.resample import DerivedSeries
+from hflow.step_selection import (
+    ALL_REGISTERED_STEPS,
+    RegisteredStepSelection,
+    SelectedRegisteredSteps,
+    registered_step_is_selected,
+)
 from hflow.steps import (
     GATE_UNEVALUATED_TAG_PREFIX,
     RUN_PROFILES,
@@ -1299,14 +1305,58 @@ class App:
         self.checks = [registered for registered in self.checks if registered.name != check_name]
         self._default_check_names.discard(check_name)
 
-    def _registered_step_names(self) -> set[str]:
+    def _registered_step_stages(self) -> dict[str, Stage]:
         # Checks, enrichments, and the built-in media step share the catalog's
         # check_name column, so names are unique across all three.
-        return (
-            {MEDIA_CONTACT_SHEET_STEP_NAME}
-            | {registered.name for registered in self.checks}
-            | {registered.name for registered in self.enrichments}
+        return {
+            MEDIA_CONTACT_SHEET_STEP_NAME: Stage.MEDIA,
+            **{registered.name: Stage.META for registered in self.checks},
+            **{registered.name: Stage.LABELS for registered in self.enrichments},
+        }
+
+    def _registered_step_names(self) -> set[str]:
+        return set(self._registered_step_stages())
+
+    def _resolve_registered_step_selection(
+        self,
+        step_names: Iterable[str] | None,
+        enabled_stages: Iterable[Stage],
+    ) -> RegisteredStepSelection:
+        """Parse a registered-step request before any episode I/O.
+
+        The returned variant preserves what was learned here, so planning and
+        execution do not reinterpret ``None`` or revalidate raw names.
+        """
+        if step_names is None:
+            return ALL_REGISTERED_STEPS
+        if isinstance(step_names, str):
+            raise TypeError("step_names must be an iterable of names, not one string")
+        selected_step_names = frozenset(step_names)
+        non_string_step_names = sorted(
+            repr(step_name) for step_name in selected_step_names if not isinstance(step_name, str)
         )
+        if non_string_step_names:
+            raise TypeError(f"step names must be strings, got {non_string_step_names}")
+        stage_by_step_name = self._registered_step_stages()
+        unknown_step_names = sorted(selected_step_names - stage_by_step_name.keys())
+        if unknown_step_names:
+            raise ValueError(
+                f"unknown step names {unknown_step_names}; registered steps: "
+                f"{sorted(stage_by_step_name)}"
+            )
+        enabled_stage_set = frozenset(enabled_stages)
+        disabled_selections = sorted(
+            f"{step_name} ({stage_by_step_name[step_name].value})"
+            for step_name in selected_step_names
+            if stage_by_step_name[step_name] not in enabled_stage_set
+        )
+        if disabled_selections:
+            raise ValueError(
+                "selected steps belong to stages that are not enabled: "
+                f"{disabled_selections}; enabled stages: "
+                f"{sorted(stage.value for stage in enabled_stage_set)}"
+            )
+        return SelectedRegisteredSteps(selected_step_names)
 
     @property
     def pipeline_version(self) -> str:
@@ -1646,11 +1696,15 @@ class App:
             f"a key under the data root {self.storage_root}"
         )
 
-    def _used_endpoint_aliases(self) -> set[str]:
+    def _used_endpoint_aliases(
+        self,
+        step_selection: RegisteredStepSelection = ALL_REGISTERED_STEPS,
+    ) -> set[str]:
         return {
             registered.uses
             for registered in [*self.checks, *self.enrichments]
             if registered.uses is not None
+            and registered_step_is_selected(step_selection, registered.name)
         }
 
     def _resolve_endpoint_overrides(self) -> None:
@@ -1694,10 +1748,17 @@ class App:
                 resolved[alias] = environment_override
         self.endpoints = MappingProxyType(resolved)
 
-    def _preflight(self) -> None:
+    def _preflight(
+        self,
+        step_selection: RegisteredStepSelection = ALL_REGISTERED_STEPS,
+    ) -> None:
         self._resolve_endpoint_overrides()
         missing = sorted(
-            {alias for alias in self._used_endpoint_aliases() if alias not in self.endpoints}
+            {
+                alias
+                for alias in self._used_endpoint_aliases(step_selection)
+                if alias not in self.endpoints
+            }
         )
         if missing:
             raise ValueError(
@@ -1737,6 +1798,7 @@ class App:
         verbose: bool = True,
         record: bool = False,
         stages: Iterable[Stage] | str | None = None,
+        step_names: Iterable[str] | None = None,
     ) -> TestReport:
         """The dev loop: run the whole pipeline on one episode, in-process.
 
@@ -1746,7 +1808,9 @@ class App:
         record to the catalog -- iterating on a check should not pollute it.
         Pass ``record=True`` to append the run (idempotent per episode
         content and step versions). ``stages`` selects a run profile or an
-        explicit stage set, exactly as in :meth:`process`.
+        explicit stage set, exactly as in :meth:`process`. ``step_names``
+        optionally limits execution to named registered steps within those
+        stages.
         """
         return self.process(
             episode,
@@ -1760,6 +1824,7 @@ class App:
             verbose=verbose,
             record=record,
             stages=stages,
+            step_names=step_names,
         )
 
     def run(
@@ -1846,8 +1911,10 @@ class App:
         verbose: bool = False,
         record: bool = True,
         stages: Iterable[Stage] | str | None = None,
+        step_names: Iterable[str] | None = None,
         quarantine_history: QuarantineHistory | None = None,
         orchestrator_run_id: str | None = None,
+        _registered_step_selection: RegisteredStepSelection | None = None,
     ) -> TestReport:
         """Process one episode through the enabled stages of the stage
         graph: transform to canonical (``sync``), run checks with gate
@@ -1866,6 +1933,13 @@ class App:
         stamps are reconstructed from its own provenance record. Without
         ``meta``, the quarantine gate for ``labels``/``media`` comes from the
         episode's latest cataloged state (no catalog = no known quarantine).
+
+        ``step_names`` optionally selects registered checks, enrichments, or
+        the built-in ``media/contact_sheet`` step within the enabled stages.
+        ``None`` preserves the complete stage behavior; an empty iterable runs
+        no registered steps. Unknown names and names belonging to disabled
+        stages are refused before source or canonical episode I/O. Unselected
+        steps produce no run rows, so they remain eligible for a later pass.
 
         ``quarantine_history`` is that gate's catalog reader, open across a
         whole batch so a stage does not re-sync and re-open the catalog once
@@ -1889,8 +1963,16 @@ class App:
         :meth:`hflow.catalog.Catalog.append_episode`).
         """
         enabled_stages = _resolve_stages(stages)
+        if _registered_step_selection is None:
+            registered_step_selection = self._resolve_registered_step_selection(
+                step_names, enabled_stages
+            )
+        else:
+            if step_names is not None:
+                raise TypeError("step_names and _registered_step_selection cannot both be provided")
+            registered_step_selection = _registered_step_selection
         source_identifier = self._resolve_source_identity(episode, output_dir=output_dir)
-        self._preflight()
+        self._preflight(registered_step_selection)
         if Stage.SYNC in enabled_stages:
             source_path = self._fetch_source(episode)  # the transform reads it
         else:
@@ -2059,7 +2141,15 @@ class App:
                 sync_reused=reused_canonical,
             )
 
-            checks_to_run = self._ordered_checks() if Stage.META in enabled_stages else []
+            checks_to_run = (
+                [
+                    registered
+                    for registered in self._ordered_checks()
+                    if registered_step_is_selected(registered_step_selection, registered.name)
+                ]
+                if Stage.META in enabled_stages
+                else []
+            )
             # Keys already emitted by the pipeline's own steps in this run.
             # A default that has any key in common with what is here can be
             # superseded at the top of the loop, before paying its ffmpeg
@@ -2151,11 +2241,15 @@ class App:
                         run.result.tags.append(f"failed:{registered.name}")
 
             # Quarantine gate for labels/media: meta's in-memory result when
-            # it ran in this same invocation; otherwise the episode's latest
-            # cataloged state. No catalog row = no known quarantine: proceed.
-            # A cataloged quarantine is carried into this run's tags so a
-            # recorded run without meta never masks the state.
-            if Stage.META not in enabled_stages:
+            # it ran completely in this invocation; otherwise combine it with
+            # the episode's latest cataloged state. A partial meta run replaces
+            # a selected check's prior quarantine only when that check actually
+            # produced a result. Unselected and errored gates retain their last
+            # known state, so selecting one check cannot silently clear another
+            # gate. No catalog row means no known quarantine.
+            if Stage.META not in enabled_stages or isinstance(
+                registered_step_selection, SelectedRegisteredSteps
+            ):
                 episode_id = content_episode_id(canonical_path)
                 if quarantine_history is not None:
                     carried_tags = quarantine_history.quarantine_tags(episode_id)
@@ -2163,13 +2257,30 @@ class App:
                     with QuarantineHistory(self.workspace.catalog_root) as history:
                         carried_tags = history.quarantine_tags(episode_id)
                 if carried_tags is not None:
-                    report.quarantine_tags.extend(carried_tags)
+                    successfully_rechecked_names = {
+                        run.check.name for run in report.checks if run.result is not None
+                    }
+                    retained_tags = [
+                        tag
+                        for tag in carried_tags
+                        if not (
+                            tag.startswith("quarantined:")
+                            and tag.removeprefix("quarantined:") in successfully_rechecked_names
+                        )
+                    ]
+                    report.quarantine_tags = list(
+                        dict.fromkeys([*retained_tags, *report.quarantine_tags])
+                    )
             quarantine_skip = (
                 SkippedByQuarantine(tuple(report.quarantine_tags)) if report.quarantined else None
             )
 
             if Stage.LABELS in enabled_stages:
                 for registered_enrichment in self._ordered_enrichments():
+                    if not registered_step_is_selected(
+                        registered_step_selection, registered_enrichment.name
+                    ):
+                        continue
                     report.enrichments.append(
                         _execute_enrichment(
                             registered_enrichment, canonical_episode, quarantine_skip
@@ -2178,7 +2289,15 @@ class App:
 
             # The media stage is silently absent on a camera-less episode:
             # there is nothing to render, so no row claims otherwise.
-            if Stage.MEDIA in enabled_stages and canonical_episode.cameras:
+            if (
+                Stage.MEDIA in enabled_stages
+                and canonical_episode.cameras
+                and (
+                    registered_step_is_selected(
+                        registered_step_selection, MEDIA_CONTACT_SHEET_STEP_NAME
+                    )
+                )
+            ):
                 media_directory = run_dir / "media"
 
                 def render_contact_sheets(media_episode: Episode) -> EnrichmentResult:

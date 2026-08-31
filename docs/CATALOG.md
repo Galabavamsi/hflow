@@ -32,6 +32,22 @@ entry.run_fingerprint  # content hash of versions + the observable run outcome
 entry.written  # False when this exact run was already recorded
 ```
 
+For a targeted backfill, `step_names=` records only the selected registered
+steps:
+
+```python
+report = app.process(
+    "episode_0001.mcap",
+    stages={hflow.Stage.META},
+    step_names={"camera_integrity"},
+)
+```
+
+Unselected steps do not receive `skipped` rows and therefore remain eligible
+for later execution. A partial metadata run retains existing quarantine from
+unselected or errored critical checks; successfully re-running a selected gate
+replaces that gate's prior quarantine state.
+
 One append writes one Parquet file into each of six table directories under
 `<data_root>/catalog/`, all named `<episode_id>-<run_fingerprint>.parquet`.
 A separate `ingest_failures/` directory records the attempts that produced no

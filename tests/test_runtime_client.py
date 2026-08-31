@@ -250,6 +250,29 @@ def test_ingest_refuses_a_batch_count_the_run_could_not_honour(stub_server: str)
     assert _StubAirflowHandler.requests_seen == []
 
 
+def test_ingest_serializes_selected_step_names(stub_server: str) -> None:
+    client = AirflowClient(stub_server, "airflow", "right-password")
+
+    client.ingest(
+        "pipeline_ingest",
+        ["a.mcap"],
+        step_names=("camera_integrity", "hand_activity"),
+    )
+
+    trigger_request = next(
+        entry for entry in _StubAirflowHandler.requests_seen if entry[1].endswith("/dagRuns")
+    )
+    assert trigger_request[2] == {
+        "logical_date": None,
+        "conf": {
+            "uris": ["a.mcap"],
+            "profile": "full",
+            "mode": "batch",
+            "step_names": ["camera_integrity", "hand_activity"],
+        },
+    }
+
+
 def test_bad_credentials_surface_clearly(stub_server: str) -> None:
     client = AirflowClient(stub_server, "airflow", "wrong-password")
     with pytest.raises(AirflowClientError) as error_info:

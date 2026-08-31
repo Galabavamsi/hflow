@@ -19,7 +19,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -340,6 +340,7 @@ class AirflowClient:
         profile: str = "full",
         online: bool = False,
         batch_count: int | None = None,
+        step_names: Iterable[str] | None = None,
         dag_run_id: str | None = None,
     ) -> dict[str, Any]:
         """Trigger the MASTER ingest DAG over ``uris`` (the SDK/CLI entry point).
@@ -351,7 +352,9 @@ class AirflowClient:
         immediate batch, no bin-packing, no stagger -- instead of the default
         staggered batch lane. ``batch_count`` overrides the master's own
         bin-packing for the batch lane (ignored by the online lane, which is
-        always one batch). Supply ``dag_run_id`` when the caller may retry
+        always one batch). ``step_names`` limits the run to named registered
+        checks, enrichments, or media steps while preserving the profile's
+        stage ordering. Supply ``dag_run_id`` when the caller may retry
         (see :meth:`trigger_dag_run` for the idempotency contract).
 
         This method owns the trigger conf's shape: every caller -- the CLI,
@@ -372,4 +375,11 @@ class AirflowClient:
         }
         if batch_count is not None:
             conf["batch_count"] = batch_count
+        if step_names is not None:
+            if isinstance(step_names, str):
+                raise TypeError("step_names must be an iterable of names, not one string")
+            selected_step_names = list(step_names)
+            if not all(isinstance(step_name, str) for step_name in selected_step_names):
+                raise TypeError("step names must be strings")
+            conf["step_names"] = selected_step_names
         return self.trigger_dag_run(dag_id, conf=conf, dag_run_id=dag_run_id)
