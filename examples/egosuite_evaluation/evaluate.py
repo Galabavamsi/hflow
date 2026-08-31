@@ -109,6 +109,124 @@ class ProjectedHandFrameLabel:
     right_hand_issue_reasons: tuple[str, ...]
 
 
+def _required_label_record_string(
+    frame_record: Mapping[str, object], field_name: str, record_context: str
+) -> str:
+    field_value = frame_record.get(field_name)
+    if not isinstance(field_value, str) or not field_value:
+        raise ValueError(f"{record_context} field {field_name!r} must be a string")
+    return field_value
+
+
+def _required_label_record_integer(
+    frame_record: Mapping[str, object], field_name: str, record_context: str
+) -> int:
+    field_value = frame_record.get(field_name)
+    if not isinstance(field_value, int) or isinstance(field_value, bool):
+        raise ValueError(f"{record_context} field {field_name!r} must be an integer")
+    return field_value
+
+
+def _label_record_issue_reasons(
+    frame_record: Mapping[str, object], field_name: str, record_context: str
+) -> tuple[str, ...]:
+    field_value = frame_record.get(field_name)
+    if not isinstance(field_value, list) or not all(
+        isinstance(reason, str) for reason in field_value
+    ):
+        raise ValueError(f"{record_context} field {field_name!r} must be an array of strings")
+    return tuple(field_value)
+
+
+def load_projected_hand_label_report(
+    report_path: Path,
+) -> dict[str, list[ProjectedHandFrameLabel]]:
+    """Parse a saved label report, keyed by its stable source episode name."""
+
+    try:
+        report_payload = json.loads(report_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(
+            f"could not read projected-hand label report {report_path}: {error}"
+        ) from error
+    if not isinstance(report_payload, dict):
+        raise ValueError(f"projected-hand label report {report_path} must contain a JSON object")
+    raw_frame_records = report_payload.get("frames")
+    if not isinstance(raw_frame_records, list):
+        raise ValueError(f"projected-hand label report {report_path} must contain a 'frames' array")
+
+    labels_by_source_episode: dict[str, list[ProjectedHandFrameLabel]] = defaultdict(list)
+    seen_frame_keys: set[tuple[str, int]] = set()
+    for record_index, raw_frame_record in enumerate(raw_frame_records):
+        record_context = f"{report_path} frame record {record_index}"
+        if not isinstance(raw_frame_record, dict):
+            raise ValueError(f"{record_context} must be a JSON object")
+        source_path = Path(
+            _required_label_record_string(raw_frame_record, "source_path", record_context)
+        ).resolve()
+        source_episode = _required_label_record_string(
+            raw_frame_record, "source_episode", record_context
+        )
+        if source_episode != source_path.stem:
+            raise ValueError(
+                f"{record_context} source_episode {source_episode!r} does not match "
+                f"source_path stem {source_path.stem!r}"
+            )
+        try:
+            camera_view = CameraView(
+                _required_label_record_string(raw_frame_record, "camera_view", record_context)
+            )
+        except ValueError as error:
+            raise ValueError(f"{record_context} has an unsupported camera_view") from error
+        frame_index = _required_label_record_integer(
+            raw_frame_record, "frame_index", record_context
+        )
+        left_in_frame_joint_count = _required_label_record_integer(
+            raw_frame_record, "left_in_frame_joint_count", record_context
+        )
+        right_in_frame_joint_count = _required_label_record_integer(
+            raw_frame_record, "right_in_frame_joint_count", record_context
+        )
+        expected_hand_count = _required_label_record_integer(
+            raw_frame_record, "expected_hand_count", record_context
+        )
+        if frame_index < 0:
+            raise ValueError(f"{record_context} frame_index must be nonnegative")
+        if not 0 <= left_in_frame_joint_count <= EXPECTED_HAND_JOINT_COUNT:
+            raise ValueError(f"{record_context} left joint count must be between 0 and 21")
+        if not 0 <= right_in_frame_joint_count <= EXPECTED_HAND_JOINT_COUNT:
+            raise ValueError(f"{record_context} right joint count must be between 0 and 21")
+        if expected_hand_count not in {0, 1, 2}:
+            raise ValueError(f"{record_context} expected_hand_count must be 0, 1, or 2")
+        frame_key = (source_episode, frame_index)
+        if frame_key in seen_frame_keys:
+            raise ValueError(
+                f"{record_context} duplicates source episode {source_episode!r} frame {frame_index}"
+            )
+        seen_frame_keys.add(frame_key)
+        labels_by_source_episode[source_episode].append(
+            ProjectedHandFrameLabel(
+                source_path=source_path,
+                source_episode=source_episode,
+                camera_view=camera_view,
+                frame_index=frame_index,
+                left_in_frame_joint_count=left_in_frame_joint_count,
+                right_in_frame_joint_count=right_in_frame_joint_count,
+                expected_hand_count=expected_hand_count,
+                left_hand_issue_reasons=_label_record_issue_reasons(
+                    raw_frame_record, "left_hand_issue_reasons", record_context
+                ),
+                right_hand_issue_reasons=_label_record_issue_reasons(
+                    raw_frame_record, "right_hand_issue_reasons", record_context
+                ),
+            )
+        )
+
+    for source_labels in labels_by_source_episode.values():
+        source_labels.sort(key=lambda label: label.frame_index)
+    return dict(labels_by_source_episode)
+
+
 @dataclass(frozen=True)
 class PreparedEvaluationFrame:
     label: ProjectedHandFrameLabel

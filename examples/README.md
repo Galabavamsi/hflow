@@ -129,7 +129,10 @@ The pipeline records reference and predicted class counts, output validity,
 agreement, token usage, and timestamped disagreement intervals as one HFlow
 check result. It defaults to ten one-per-second frames per episode; all
 sampling and endpoint settings are configurable through `EGOSUITE_*`
-environment variables.
+environment variables. Set `EGOSUITE_LABEL_MANIFEST` to a label report written
+by `evaluate.py labels` when multiple HFlow episode runs must use one exact,
+predeclared dataset slice; the manifest digest becomes part of the check
+version.
 
 The companion Inspect adapter is for dataset-level model comparisons. First
 calculate labels without calling a model:

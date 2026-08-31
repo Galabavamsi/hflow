@@ -25,6 +25,7 @@ from examples.egosuite_evaluation.evaluate import (
     CameraView,
     ProjectedHandFrameLabel,
     camera_topics,
+    load_projected_hand_label_report,
     load_projected_hand_labels,
 )
 from examples.egosuite_evaluation.judgment import (
@@ -56,6 +57,7 @@ class PipelineConfiguration(NamedTuple):
     limit_per_episode: int | None
     sample_seed: int
     prompt: str
+    label_manifest_path: Path | None
 
 
 def _optional_float_environment_variable(name: str) -> float | None:
@@ -79,6 +81,7 @@ def _optional_positive_int_environment_variable(name: str, default: str) -> int 
 
 def _pipeline_configuration() -> PipelineConfiguration:
     prompt_path = Path(os.environ.get("EGOSUITE_HAND_COUNT_PROMPT", str(DEFAULT_PROMPT_PATH)))
+    raw_label_manifest_path = os.environ.get("EGOSUITE_LABEL_MANIFEST")
     return PipelineConfiguration(
         model=os.environ.get("OPENAI_MODEL", DEFAULT_MODEL_NAME),
         api_key_environment_variable=os.environ.get("EGOSUITE_API_KEY_ENV", "OPENAI_API_KEY"),
@@ -97,10 +100,18 @@ def _pipeline_configuration() -> PipelineConfiguration:
         ),
         sample_seed=int(os.environ.get("EGOSUITE_SAMPLE_SEED", "42")),
         prompt=prompt_path.read_text(),
+        label_manifest_path=(
+            Path(raw_label_manifest_path).resolve() if raw_label_manifest_path else None
+        ),
     )
 
 
 pipeline_configuration = _pipeline_configuration()
+manifest_labels_by_source_episode = (
+    load_projected_hand_label_report(pipeline_configuration.label_manifest_path)
+    if pipeline_configuration.label_manifest_path is not None
+    else None
+)
 app = hflow.App(
     "egosuite-projected-hand-visibility-example",
     data_root=os.environ.get("HFLOW_DATA_ROOT", str(DEFAULT_HFLOW_DATA_ROOT)),
@@ -123,10 +134,35 @@ def _check_version() -> str:
         "frame_stride": pipeline_configuration.frame_stride,
         "limit_per_episode": pipeline_configuration.limit_per_episode,
         "sample_seed": pipeline_configuration.sample_seed,
+        "label_manifest_sha256": (
+            hashlib.sha256(pipeline_configuration.label_manifest_path.read_bytes()).hexdigest()
+            if pipeline_configuration.label_manifest_path is not None
+            else None
+        ),
     }
     serialized_contract = json.dumps(version_contract, sort_keys=True, separators=(",", ":"))
     contract_digest = hashlib.sha256(serialized_contract.encode()).hexdigest()[:16]
     return f"egosuite-projected-hand-visibility-v1-{contract_digest}"
+
+
+def labels_for_pipeline_episode(
+    episode_path: Path,
+    labels_by_source_episode: dict[str, list[ProjectedHandFrameLabel]],
+) -> list[ProjectedHandFrameLabel]:
+    """Select one canonical episode's declared frames from a label manifest."""
+
+    canonical_suffix = ".canonical.mcap"
+    source_episode = (
+        episode_path.name[: -len(canonical_suffix)]
+        if episode_path.name.endswith(canonical_suffix)
+        else episode_path.stem
+    )
+    try:
+        return labels_by_source_episode[source_episode]
+    except KeyError:
+        raise ValueError(
+            f"label manifest has no frames for source episode {source_episode!r}"
+        ) from None
 
 
 _client_by_thread = threading.local()
@@ -290,13 +326,28 @@ def hand_visibility_check_result(
 def egosuite_projected_hand_visibility(episode: hflow.Episode) -> hflow.CheckResult:
     """Compare image-only VLM hand counts with projected EgoSuite joints."""
 
-    labels = load_projected_hand_labels(
-        episode.path,
-        camera_view=pipeline_configuration.camera_view,
-        frame_stride=pipeline_configuration.frame_stride,
-        limit_per_episode=pipeline_configuration.limit_per_episode,
-        sample_seed=pipeline_configuration.sample_seed,
-    )
+    if manifest_labels_by_source_episode is not None:
+        labels = labels_for_pipeline_episode(episode.path, manifest_labels_by_source_episode)
+        mismatched_camera_views = sorted(
+            {
+                label.camera_view.value
+                for label in labels
+                if label.camera_view is not pipeline_configuration.camera_view
+            }
+        )
+        if mismatched_camera_views:
+            raise ValueError(
+                f"label manifest camera views {mismatched_camera_views} do not match configured "
+                f"camera {pipeline_configuration.camera_view.value!r}"
+            )
+    else:
+        labels = load_projected_hand_labels(
+            episode.path,
+            camera_view=pipeline_configuration.camera_view,
+            frame_stride=pipeline_configuration.frame_stride,
+            limit_per_episode=pipeline_configuration.limit_per_episode,
+            sample_seed=pipeline_configuration.sample_seed,
+        )
     extracted_frames = episode.frames_at_indices(
         camera_topics(pipeline_configuration.camera_view).video,
         frame_indices=[label.frame_index for label in labels],

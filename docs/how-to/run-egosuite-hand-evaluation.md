@@ -140,6 +140,19 @@ equivalent sampling. Configure it with `EGOSUITE_FRAME_STRIDE`,
 and the other `EGOSUITE_*` environment variables defined in
 [`pipeline.py`](../../examples/egosuite_evaluation/pipeline.py).
 
+To apply an exact saved slice rather than resampling each episode, point the
+pipeline at a label report produced by the `labels` command:
+
+```bash
+export EGOSUITE_LABEL_MANIFEST='data/egosuite-evaluation/labels/natural-1000.json'
+```
+
+The pipeline validates every manifest record, selects its declared source
+frame indices for each canonical episode, and includes the manifest digest in
+the HFlow check version. Missing or malformed model content is retained as a
+`valid=false` observation so provider output failures lower end-to-end
+accuracy instead of discarding the episode's evidence.
+
 Use this entrypoint when the judgment belongs in an HFlow episode pipeline.
 Use `evaluate.py` below when comparing models over a declared dataset slice;
 Inspect retains each raw response and produces cross-episode evaluation

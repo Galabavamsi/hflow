@@ -158,10 +158,19 @@ def evaluate_image_with_model(
         request_parameters["temperature"] = temperature
 
     response = client.chat.completions.create(**request_parameters)
-    raw_response = _chat_completion_response_text(response)
     response_model = getattr(response, "model", None)
     normalized_response_model = response_model if isinstance(response_model, str) else None
     usage = _response_usage(response)
+    try:
+        raw_response = _chat_completion_response_text(response)
+    except ValueError as error:
+        return HandCountJudgment(
+            raw_response="",
+            predicted_hand_count=None,
+            response_model=normalized_response_model,
+            usage=usage,
+            parse_error=str(error),
+        )
     try:
         predicted_hand_count = parse_hand_count_response(raw_response)
     except ValueError as error:

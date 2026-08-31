@@ -4,6 +4,7 @@ import json
 import math
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import hflow
 import pytest
@@ -15,6 +16,7 @@ from examples.egosuite_evaluation.evaluate import (
     ProjectedHandFrameLabel,
     _evaluation_result_summary,
     _selected_frame_indices,
+    load_projected_hand_label_report,
     main,
     parse_hand_count_response,
     select_episode_paths,
@@ -27,11 +29,16 @@ from examples.egosuite_evaluation.geometry import (
     Quaternion,
     project_world_joints,
 )
-from examples.egosuite_evaluation.judgment import HandCountJudgment
+from examples.egosuite_evaluation.judgment import (
+    HandCountJudgment,
+    ResponseFormat,
+    evaluate_image_with_model,
+)
 from examples.egosuite_evaluation.pipeline import (
     VISION_ENDPOINT_ALIAS,
     app,
     hand_visibility_check_result,
+    labels_for_pipeline_episode,
 )
 
 IDENTITY_CAMERA_POSE = CameraPoseInWorld(
@@ -100,11 +107,76 @@ def test_hand_count_parser_accepts_supported_endpoint_responses(
     assert parse_hand_count_response(response_text) == expected_hand_count
 
 
+def test_model_response_without_text_is_a_recoverable_invalid_judgment() -> None:
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=None))],
+        model="routed-model",
+        usage=SimpleNamespace(model_dump=lambda **_arguments: {"total_tokens": 17}),
+    )
+    client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=lambda **_arguments: response),
+        )
+    )
+
+    judgment = evaluate_image_with_model(
+        client=client,
+        model="requested-model",
+        prompt="count hands",
+        image_data_url="data:image/jpeg;base64,unused",
+        response_format=ResponseFormat.JSON_SCHEMA,
+        temperature=None,
+        max_tokens=512,
+    )
+
+    assert judgment == HandCountJudgment(
+        raw_response="",
+        predicted_hand_count=None,
+        response_model="routed-model",
+        usage={"total_tokens": 17},
+        parse_error="endpoint returned no text completion content",
+    )
+
+
 def test_pipeline_registers_projected_hand_visibility_as_an_hflow_check() -> None:
     checks_by_name = {check.name: check for check in app.checks}
 
     assert set(checks_by_name) == {"egosuite_projected_hand_visibility"}
     assert checks_by_name["egosuite_projected_hand_visibility"].uses == VISION_ENDPOINT_ALIAS
+
+
+def test_saved_label_report_selects_exact_frames_for_a_canonical_episode(tmp_path: Path) -> None:
+    source_path = tmp_path / "episode-123.mcap"
+    report_path = tmp_path / "labels.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "frames": [
+                    {
+                        "source_path": str(source_path),
+                        "source_episode": "episode-123",
+                        "camera_view": "head-left",
+                        "frame_index": frame_index,
+                        "left_in_frame_joint_count": 21,
+                        "right_in_frame_joint_count": 21 if frame_index == 8 else 0,
+                        "expected_hand_count": 2 if frame_index == 8 else 1,
+                        "left_hand_issue_reasons": [],
+                        "right_hand_issue_reasons": ["occlusion"] if frame_index == 8 else [],
+                    }
+                    for frame_index in (8, 3)
+                ]
+            }
+        )
+    )
+
+    labels_by_source_episode = load_projected_hand_label_report(report_path)
+    selected_labels = labels_for_pipeline_episode(
+        tmp_path / "episode-123.canonical.mcap", labels_by_source_episode
+    )
+
+    assert [label.frame_index for label in selected_labels] == [3, 8]
+    assert [label.expected_hand_count for label in selected_labels] == [1, 2]
+    assert selected_labels[1].right_hand_issue_reasons == ("occlusion",)
 
 
 def test_pipeline_records_agreement_output_validity_and_frame_intervals() -> None:
