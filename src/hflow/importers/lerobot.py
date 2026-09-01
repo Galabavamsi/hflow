@@ -248,19 +248,41 @@ def _hf_repo_info(repo_id: str, revision: str) -> _DatasetRepositoryInformation:
 def _hf_tree(repo_id: str, revision: str, path: str) -> list[dict]:
     """List files under a HF dataset tree path (recursive)."""
     url = f"https://huggingface.co/api/datasets/{repo_id}/tree/{revision}/{path}?recursive=true"
-    with urllib.request.urlopen(_hugging_face_request(url), timeout=60) as response:
-        try:
-            tree_entries = json.loads(response.read().decode())
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise ValueError(
-                f"Hugging Face tree response for {repo_id}@{revision} path {path!r} is not "
-                f"valid JSON: {error}"
-            ) from error
-    if not isinstance(tree_entries, list) or not all(
-        isinstance(tree_entry, dict) for tree_entry in tree_entries
-    ):
-        raise ValueError(f"Hugging Face tree response for {path!r} is not a list of objects")
-    return tree_entries
+    all_tree_entries: list[dict] = []
+    next_url: str | None = url
+    while next_url is not None:
+        with urllib.request.urlopen(_hugging_face_request(next_url), timeout=60) as response:
+            try:
+                tree_entries = json.loads(response.read().decode())
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError(
+                    f"Hugging Face tree response for {repo_id}@{revision} path {path!r} is not "
+                    f"valid JSON: {error}"
+                ) from error
+            link_header = response.headers.get("Link")
+        if not isinstance(tree_entries, list) or not all(
+            isinstance(tree_entry, dict) for tree_entry in tree_entries
+        ):
+            raise ValueError(f"Hugging Face tree response for {path!r} is not a list of objects")
+        all_tree_entries.extend(tree_entries)
+
+        next_url = None
+        for link_entry in (link_header or "").split(","):
+            link_match = re.fullmatch(r"\s*<([^>]+)>\s*;\s*(.*)", link_entry)
+            if link_match is None:
+                continue
+            relation_match = re.search(
+                r"(?:^|;)\s*rel\s*=\s*(?:\"([^\"]+)\"|([^;\s]+))",
+                link_match.group(2),
+                flags=re.IGNORECASE,
+            )
+            if relation_match is None:
+                continue
+            relations = (relation_match.group(1) or relation_match.group(2)).split()
+            if any(relation.lower() == "next" for relation in relations):
+                next_url = link_match.group(1)
+                break
+    return all_tree_entries
 
 
 def _hugging_face_request(url: str) -> urllib.request.Request:
