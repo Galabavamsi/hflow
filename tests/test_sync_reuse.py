@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import hflow
+from hflow.app import _read_sync_completion_marker
 from hflow.testing import SyntheticEpisodeSpec, synthesize_episode
 from hflow.transform import EpisodeStamps, TransformConfig, write_canonical_episode
 
@@ -141,6 +142,48 @@ def test_a_marker_without_a_witness_transcodes_once_and_gains_one(tmp_path: Path
 
     third = app.process(source, record=False, stages=SYNC_ONLY, verbose=False)
     assert third.sync_reused is True
+
+
+@pytest.mark.parametrize(
+    "present_fields",
+    [
+        ("source_digest",),
+        ("ffmpeg_version",),
+        ("transform_kind",),
+        ("source_digest", "ffmpeg_version"),
+        ("source_digest", "transform_kind"),
+        ("ffmpeg_version", "transform_kind"),
+    ],
+)
+def test_every_partial_reuse_witness_stays_readable_but_is_not_reused(
+    tmp_path: Path, present_fields: tuple[str, ...]
+) -> None:
+    source = _episode(tmp_path / "episode_0001.mcap")
+    app = hflow.App("partial-witness", data_root=tmp_path / "data", default_checks=())
+    first = app.process(source, record=False, stages=SYNC_ONLY, verbose=False)
+
+    marker_path = first.canonical_path.parent / ".sync-complete.json"
+    marker_payload = json.loads(marker_path.read_text())
+    witness_fields = {"source_digest", "ffmpeg_version", "transform_kind"}
+    marker_payload = {
+        key: value
+        for key, value in marker_payload.items()
+        if key not in witness_fields or key in present_fields
+    }
+    marker_path.write_text(json.dumps(marker_payload, sort_keys=True) + "\n")
+
+    # Pin the mechanism, not only the outcome: the reader must drop the whole
+    # group. Read before the runs below, which rewrite the marker with a
+    # complete witness. Without this, the parse could go back to accepting a
+    # partial witness and the run below would still refuse reuse, on a later
+    # gate check rather than on this one.
+    assert _read_sync_completion_marker(marker_path).reuse_witness is None
+
+    metadata_only = app.process(source, record=False, stages={hflow.Stage.META}, verbose=False)
+    assert metadata_only.canonical_path == first.canonical_path
+
+    second = app.process(source, record=False, stages=SYNC_ONLY, verbose=False)
+    assert second.sync_reused is False
 
 
 @pytest.mark.parametrize(
