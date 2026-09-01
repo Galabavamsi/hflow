@@ -620,11 +620,16 @@ def test_hf_tree_valid_json_still_returns_entries(monkeypatch: pytest.MonkeyPatc
     assert len(stub.requests) == 1
 
 
-def test_hf_tree_follows_next_link_and_preserves_request_headers(
+def test_hf_tree_follows_next_link_preserves_headers_and_deduplicates_entries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     first_page = json.dumps([{"path": "meta/info.json", "type": "file"}]).encode()
-    second_page = json.dumps([{"path": "meta/episodes/file-000.parquet", "type": "file"}]).encode()
+    second_page = json.dumps(
+        [
+            {"path": "meta/info.json", "type": "file"},
+            {"path": "meta/episodes/file-000.parquet", "type": "file"},
+        ]
+    ).encode()
     next_url = (
         "https://huggingface.co/api/datasets/lerobot/pusht/tree/main/meta"
         "?recursive=true&cursor=page-2"

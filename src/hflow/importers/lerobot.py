@@ -249,6 +249,7 @@ def _hf_tree(repo_id: str, revision: str, path: str) -> list[dict]:
     """List files under a HF dataset tree path (recursive)."""
     url = f"https://huggingface.co/api/datasets/{repo_id}/tree/{revision}/{path}?recursive=true"
     all_tree_entries: list[dict] = []
+    seen_paths: set[str] = set()
     next_url: str | None = url
     while next_url is not None:
         with urllib.request.urlopen(_hugging_face_request(next_url), timeout=60) as response:
@@ -264,7 +265,13 @@ def _hf_tree(repo_id: str, revision: str, path: str) -> list[dict]:
             isinstance(tree_entry, dict) for tree_entry in tree_entries
         ):
             raise ValueError(f"Hugging Face tree response for {path!r} is not a list of objects")
-        all_tree_entries.extend(tree_entries)
+        for tree_entry in tree_entries:
+            tree_entry_path = tree_entry.get("path")
+            if isinstance(tree_entry_path, str):
+                if tree_entry_path in seen_paths:
+                    continue
+                seen_paths.add(tree_entry_path)
+            all_tree_entries.append(tree_entry)
 
         next_url = None
         for link_entry in (link_header or "").split(","):
