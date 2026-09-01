@@ -27,6 +27,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NotRequired, TypedDict
+from urllib.parse import urlsplit
 
 from mcap.writer import Writer as McapWriter
 
@@ -248,10 +249,32 @@ def _hf_repo_info(repo_id: str, revision: str) -> _DatasetRepositoryInformation:
 def _hf_tree(repo_id: str, revision: str, path: str) -> list[dict]:
     """List files under a HF dataset tree path (recursive)."""
     url = f"https://huggingface.co/api/datasets/{repo_id}/tree/{revision}/{path}?recursive=true"
+    initial_url_parts = urlsplit(url)
+    initial_origin = (initial_url_parts.scheme, initial_url_parts.netloc)
     all_tree_entries: list[dict] = []
     seen_paths: set[str] = set()
+    visited_urls: set[str] = set()
     next_url: str | None = url
     while next_url is not None:
+        if next_url in visited_urls:
+            raise ValueError(
+                f"Hugging Face tree response for {repo_id}@{revision} path {path!r} "
+                f"repeated an already fetched pagination URL: {next_url!r}"
+            )
+        try:
+            next_url_parts = urlsplit(next_url)
+        except ValueError as error:
+            raise ValueError(
+                f"Hugging Face tree response for {repo_id}@{revision} path {path!r} "
+                f"contains an invalid pagination URL: {next_url!r}"
+            ) from error
+        next_origin = (next_url_parts.scheme, next_url_parts.netloc)
+        if next_origin != initial_origin:
+            raise ValueError(
+                f"Hugging Face tree response for {repo_id}@{revision} path {path!r} "
+                f"contains a pagination URL with a different scheme and host: {next_url!r}"
+            )
+        visited_urls.add(next_url)
         with urllib.request.urlopen(_hugging_face_request(next_url), timeout=60) as response:
             try:
                 tree_entries = json.loads(response.read().decode())

@@ -495,15 +495,21 @@ class _StubUrlopen:
     """Routes urlopen calls to fixed bytes by a marker in the request URL."""
 
     def __init__(
-        self, routes: dict[str, bytes], response_headers: dict[str, dict[str, str]] | None = None
+        self,
+        routes: dict[str, bytes],
+        response_headers: dict[str, dict[str, str]] | None = None,
+        max_requests: int | None = None,
     ) -> None:
         self._routes = routes
         self._response_headers = response_headers or {}
+        self._max_requests = max_requests
         self.requests: list[urllib.request.Request] = []
 
     def __call__(self, request: urllib.request.Request, timeout: int = 60) -> _StubResponse:
         url = request.full_url
         self.requests.append(request)
+        if self._max_requests is not None and len(self.requests) > self._max_requests:
+            raise AssertionError(f"urlopen exceeded test request limit: {self._max_requests}")
         for marker, body in self._routes.items():
             if marker in url:
                 return _StubResponse(body, self._response_headers.get(marker))
@@ -514,8 +520,9 @@ def _stub_urlopen(
     monkeypatch: pytest.MonkeyPatch,
     routes: dict[str, bytes],
     response_headers: dict[str, dict[str, str]] | None = None,
+    max_requests: int | None = None,
 ) -> _StubUrlopen:
-    stub = _StubUrlopen(routes, response_headers)
+    stub = _StubUrlopen(routes, response_headers, max_requests)
     monkeypatch.setattr(urllib.request, "urlopen", stub)
     return stub
 
@@ -652,6 +659,43 @@ def test_hf_tree_follows_next_link_preserves_headers_and_deduplicates_entries(
     for request in stub.requests:
         assert request.get_header("User-agent") == "hflow-lerobot"
         assert request.get_header("Authorization") == "Bearer test-token"
+
+
+def test_hf_tree_rejects_next_link_with_different_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_page = json.dumps([{"path": "meta/info.json", "type": "file"}]).encode()
+    unsafe_next_url = "https://attacker.example/tree/secret?cursor=page-2"
+    stub = _stub_urlopen(
+        monkeypatch,
+        {"/tree/": first_page},
+        {"/tree/": {"Link": f'<{unsafe_next_url}>; rel="next"'}},
+        max_requests=1,
+    )
+    monkeypatch.setenv("HF_TOKEN", "secret-user-token")
+
+    with pytest.raises(ValueError, match="different scheme and host"):
+        prep._hf_tree("lerobot/pusht", "main", "meta")
+
+    assert len(stub.requests) == 1
+
+
+def test_hf_tree_rejects_a_repeated_next_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_page = json.dumps([{"path": "meta/info.json", "type": "file"}]).encode()
+    page_url = "https://huggingface.co/api/datasets/lerobot/pusht/tree/main/meta?recursive=true"
+    stub = _stub_urlopen(
+        monkeypatch,
+        {"/tree/": first_page},
+        {"/tree/": {"Link": f'<{page_url}>; rel="next"'}},
+        max_requests=1,
+    )
+
+    with pytest.raises(ValueError, match="already fetched"):
+        prep._hf_tree("lerobot/pusht", "main", "meta")
+
+    assert len(stub.requests) == 1
 
 
 def test_hf_tree_malformed_later_page_raises_contextual_value_error(
