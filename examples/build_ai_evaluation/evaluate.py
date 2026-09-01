@@ -29,6 +29,7 @@ from typing import Any, assert_never, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import duckdb
+import hflow
 from inspect_ai import SampleSource, Task, eval_set
 from inspect_ai.dataset import Sample
 from inspect_ai.log import EvalLog, EvalSample, read_eval_log
@@ -522,11 +523,10 @@ def _run_metadata_document(configuration: EvaluationConfiguration) -> dict[str, 
         "row_limit_per_source": configuration.row_limit_per_source,
         "prompts": prompt_metadata,
     }
-    serialized_contract = json.dumps(result_contract, sort_keys=True, separators=(",", ":"))
     return {
         "schema_version": SCHEMA_VERSION,
         "label": configuration.label,
-        "fingerprint": _sha256_text(serialized_contract),
+        "fingerprint": hflow.fingerprint_contract(result_contract),
         **result_contract,
         "api_key_environment_variable": configuration.api_key_environment_variable,
         "worker_count": configuration.worker_count,

@@ -1019,11 +1019,10 @@ def _run_metadata_document(configuration: EvaluationConfiguration) -> dict[str, 
             "response_schema": HAND_COUNT_RESPONSE_SCHEMA,
         },
     }
-    serialized_contract = json.dumps(result_contract, sort_keys=True, separators=(",", ":"))
     return {
         "schema_version": SCHEMA_VERSION,
         "label": configuration.label,
-        "fingerprint": _sha256_text(serialized_contract),
+        "fingerprint": hflow.fingerprint_contract(result_contract),
         **result_contract,
         "api_key_environment_variable": configuration.api_key_environment_variable,
         "worker_count": configuration.worker_count,

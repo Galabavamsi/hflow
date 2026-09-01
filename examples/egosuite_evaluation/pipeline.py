@@ -12,7 +12,6 @@ import argparse
 import concurrent.futures
 import hashlib
 import importlib
-import json
 import os
 import threading
 from collections import Counter
@@ -124,9 +123,8 @@ app = hflow.App(
 )
 
 
-def _check_version() -> str:
+def _check_version() -> hflow.StepVersion:
     version_contract = {
-        "contract": "egosuite-projected-hand-visibility-v1",
         "prompt": pipeline_configuration.prompt,
         "model": pipeline_configuration.model,
         "response_format": pipeline_configuration.response_format.value,
@@ -142,9 +140,10 @@ def _check_version() -> str:
             else None
         ),
     }
-    serialized_contract = json.dumps(version_contract, sort_keys=True, separators=(",", ":"))
-    contract_digest = hashlib.sha256(serialized_contract.encode()).hexdigest()[:16]
-    return f"egosuite-projected-hand-visibility-v1-{contract_digest}"
+    return hflow.step_version_from_contract(
+        "egosuite-projected-hand-visibility-v1",
+        version_contract,
+    )
 
 
 def labels_for_pipeline_episode(

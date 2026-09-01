@@ -261,6 +261,32 @@ key is unrecoverable rather than merely untidy.
 
 Every recorded result also carries the version the pipeline declared. Bump it when a changed check or retuned threshold should append new-version rows instead of being treated as comparable with the old results.
 
+When comparability depends on data such as a prompt, model, response schema, or
+threshold set, derive the version from that complete contract instead of
+manually keeping a version string in sync:
+
+```python
+model_contract = {
+    "model": model_name,
+    "prompt": prompt,
+    "temperature": 0.0,
+    "response_schema": response_schema,
+}
+
+
+@app.check(
+    version=hflow.step_version_from_contract("scene-judge-v1", model_contract),
+    uses="vision",
+)
+def scene_judge(episode: hflow.Episode) -> hflow.CheckResult: ...
+```
+
+`hflow.fingerprint_contract()` exposes the corresponding full canonical
+SHA-256 for sample, method, and protocol identities. Contracts accept nested
+JSON values, treat mapping order and list-versus-tuple representation as
+equivalent, and reject non-string keys, non-finite numbers, and non-JSON
+objects.
+
 ## The dev loop
 
 ```python
@@ -269,24 +295,37 @@ report = app.test("episode_0001.mcap")
 
 `app.test()` runs the whole registered pipeline on one episode **in-process**, with no Docker and no scheduler. It transforms the input into a canonical episode under `<data_root>/test-runs/`, runs every check with the ordering and gate semantics described above, prints a summary, and returns the full `TestReport` (per-check status, measurements, durations, quarantine tags). Iterate on a check in seconds; the canonical file it writes opens directly in Foxglove or Rerun for eyeballing.
 
+Use `report.check("scene_judge")` to retrieve one check's typed run report.
+HFlow guarantees registered step names are unique; requesting a name that is
+not present raises `KeyError` and lists the available checks.
+
 For a bounded local corpus experiment, use the same loop without rebuilding
 thread-pool plumbing in every pipeline:
 
 ```python
-reports = app.test_many(
+def print_progress(progress: hflow.TestManyProgress) -> None:
+    print(f"[{progress.completed_count}/{progress.total_count}] {progress.report.source_path.name}")
+
+
+batch_report = app.test_many(
     ["episode_0001.mcap", "episode_0002.mcap"],
     max_workers=4,
     stages=(hflow.Stage.SYNC, hflow.Stage.META),
+    on_progress=print_progress,
 )
+reports = batch_report.reports
 ```
 
-`app.test_many()` preserves input order and keeps at most `max_workers`
-episodes submitted at once. Sources must be distinct because each source owns
-one test-run directory. A source-preparation failure stops new submissions and
-is raised after already-running episodes finish, so no worker keeps writing
-after control returns to the caller. This remains an in-process development
-tool; use `app.run()` or a deployed runtime when the corpus needs durable
-scheduling and retries.
+`app.test_many()` returns a `TestManyReport` whose `reports` tuple preserves
+input order and keeps at most `max_workers` episodes submitted at once. The
+optional progress callback runs on the coordinator thread as episodes finish;
+each event carries its original input index because completion order may differ
+from report order. Sources must be distinct because each source owns one
+test-run directory. A source-preparation or progress-callback failure stops new
+submissions and is raised after already-running episodes finish, so no worker
+keeps writing after control returns to the caller. This remains an in-process
+development tool; use `app.run()` or a deployed runtime when the corpus needs
+durable scheduling and retries.
 
 ### Test one check directly
 

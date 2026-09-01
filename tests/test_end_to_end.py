@@ -99,6 +99,21 @@ def test_whole_pipeline_runs_without_quarantine(
     assert "camera_blackout" in summary_text
 
 
+def test_report_returns_a_named_check_and_explains_missing_names(
+    report_and_app: tuple[hflow.TestReport, hflow.App],
+) -> None:
+    report, _application = report_and_app
+
+    named_check_run = report.check("joint_smoothness")
+
+    assert named_check_run.check.name == "joint_smoothness"
+    assert named_check_run.result is not None
+    with pytest.raises(KeyError) as missing_check_error:
+        report.check("unregistered_check")
+    assert "test report has no check named 'unregistered_check'" in str(missing_check_error.value)
+    assert "'joint_smoothness'" in str(missing_check_error.value)
+
+
 def test_many_runs_distinct_episodes_and_preserves_input_order(tmp_path: Path) -> None:
     source_paths = tuple(
         synthesize_episode(
@@ -122,18 +137,27 @@ def test_many_runs_distinct_episodes_and_preserves_input_order(tmp_path: Path) -
         return hflow.CheckResult(measurements={"episode/task": str(episode.metadata["task"])})
 
     requested_source_paths = (source_paths[2], source_paths[0], source_paths[1])
-    reports = application.test_many(
+    progress_events: list[hflow.TestManyProgress] = []
+    batch_report = application.test_many(
         requested_source_paths,
         max_workers=2,
         stages=(hflow.Stage.SYNC, hflow.Stage.META),
+        on_progress=progress_events.append,
     )
+    reports = batch_report.reports
 
     assert [report.source_path for report in reports] == list(requested_source_paths)
+    assert batch_report.has_errors is False
+    assert [progress.completed_count for progress in progress_events] == [1, 2, 3]
+    assert {progress.total_count for progress in progress_events} == {3}
+    assert {progress.input_index for progress in progress_events} == {0, 1, 2}
+    assert all(
+        progress.report.source_path == requested_source_paths[progress.input_index]
+        for progress in progress_events
+    )
     measured_tasks: list[str] = []
     for report in reports:
-        task_check_run = next(
-            check_run for check_run in report.checks if check_run.check.name == "episode_task"
-        )
+        task_check_run = report.check("episode_task")
         assert task_check_run.result is not None
         measured_tasks.append(str(task_check_run.result.measurements["episode/task"]))
     assert measured_tasks == ["task-2", "task-0", "task-1"]
@@ -185,6 +209,34 @@ def test_many_stops_scheduling_new_episodes_after_preparation_failure(
     test_run_directories = tuple(application.workspace.test_runs_root.workspace.iterdir())
     assert not any(
         run_directory.name.startswith(f"{source_that_must_not_start.stem}-")
+        for run_directory in test_run_directories
+    )
+
+
+def test_many_stops_scheduling_new_episodes_after_progress_failure(tmp_path: Path) -> None:
+    source_paths = tuple(
+        synthesize_episode(
+            tmp_path / "sources" / f"episode_{episode_number}.mcap",
+            SyntheticEpisodeSpec(duration_s=0.1, cameras=()),
+        )
+        for episode_number in range(3)
+    )
+    application = hflow.App("batch-test", data_root=tmp_path / "data", default_checks=())
+
+    def reject_first_progress(_progress: hflow.TestManyProgress) -> None:
+        raise RuntimeError("progress consumer failed")
+
+    with pytest.raises(RuntimeError, match="progress consumer failed"):
+        application.test_many(
+            source_paths,
+            max_workers=2,
+            stages=(hflow.Stage.SYNC,),
+            on_progress=reject_first_progress,
+        )
+
+    test_run_directories = tuple(application.workspace.test_runs_root.workspace.iterdir())
+    assert not any(
+        run_directory.name.startswith(f"{source_paths[2].stem}-")
         for run_directory in test_run_directories
     )
 

@@ -499,6 +499,7 @@ def _run_with_bounded_concurrency(
     operation: Callable[[_ConcurrentInputT], _ConcurrentResultT],
     *,
     concurrency_limit: _ConcurrentTestLimit,
+    on_completion: Callable[[int, _ConcurrentResultT, int, int], None] | None = None,
 ) -> list[_ConcurrentResultT]:
     """Run at most ``concurrency_limit`` submitted operations, retaining input order.
 
@@ -507,7 +508,8 @@ def _run_with_bounded_concurrency(
     submitted work bounded means a preparation failure can stop later episodes before
     they create files or make endpoint calls. Already-running operations finish before
     the exception escapes, so no worker keeps mutating a workspace after the caller has
-    regained control.
+    regained control. Completion callbacks run on the coordinator before replacement
+    work is submitted, so a callback failure has the same stop-scheduling guarantee.
     """
 
     if not inputs:
@@ -515,6 +517,7 @@ def _run_with_bounded_concurrency(
 
     results_by_input_index: dict[int, _ConcurrentResultT] = {}
     next_input_index = 0
+    completed_result_count = 0
     with ThreadPoolExecutor(max_workers=int(concurrency_limit)) as thread_pool:
         input_index_by_future: dict[Future[_ConcurrentResultT], int] = {}
 
@@ -545,7 +548,16 @@ def _run_with_bounded_concurrency(
                 for completed_future in ordered_completed_futures:
                     completed_input_index = input_index_by_future.pop(completed_future)
                     completed_results.append((completed_input_index, completed_future.result()))
-                results_by_input_index.update(completed_results)
+                for completed_input_index, completed_result in completed_results:
+                    results_by_input_index[completed_input_index] = completed_result
+                    completed_result_count += 1
+                    if on_completion is not None:
+                        on_completion(
+                            completed_input_index,
+                            completed_result,
+                            completed_result_count,
+                            len(inputs),
+                        )
                 for _ in completed_results:
                     submit_next_input()
         except BaseException:
@@ -1087,6 +1099,25 @@ class TestReport:
     # without comparing file timestamps.
     sync_reused: bool = False
 
+    def check(self, name: str) -> CheckRunReport:
+        """Return the run report for the uniquely named check.
+
+        Raises :class:`KeyError` with the available names when this report does
+        not contain the requested check. Check names are unique within an
+        application, so callers never need to choose between multiple runs.
+        """
+
+        for check_run in self.checks:
+            if check_run.check.name == name:
+                return check_run
+
+        available_check_names = ", ".join(repr(check_run.check.name) for check_run in self.checks)
+        if not available_check_names:
+            available_check_names = "(none)"
+        raise KeyError(
+            f"test report has no check named {name!r}; available checks: {available_check_names}"
+        )
+
     @property
     def quarantined(self) -> bool:
         """Whether this run carries any quarantine tag.
@@ -1189,6 +1220,37 @@ class TestReport:
 
     def __str__(self) -> str:
         return self.summary()
+
+
+@dataclass(frozen=True)
+class TestManyProgress:
+    """One completed episode reported from the ``test_many`` coordinator."""
+
+    input_index: int
+    completed_count: int
+    total_count: int
+    report: TestReport
+
+    def summary(self) -> str:
+        """Return a concise completion line suitable for ``on_progress=print``."""
+
+        return f"[{self.completed_count}/{self.total_count}] {self.report.source_path.name}"
+
+    def __str__(self) -> str:
+        return self.summary()
+
+
+@dataclass(frozen=True)
+class TestManyReport:
+    """The input-ordered reports produced by one bounded local corpus test."""
+
+    reports: tuple[TestReport, ...]
+
+    @property
+    def has_errors(self) -> bool:
+        """Whether any episode report contains a check or enrichment error."""
+
+        return any(report.has_errors for report in self.reports)
 
 
 class App:
@@ -1969,16 +2031,21 @@ class App:
         record: bool = False,
         stages: Iterable[Stage] | str | None = None,
         step_names: Iterable[str] | None = None,
-    ) -> list[TestReport]:
+        on_progress: Callable[[TestManyProgress], None] | None = None,
+    ) -> TestManyReport:
         """Run the in-process dev loop over distinct episodes with bounded concurrency.
 
-        Reports preserve the input order even when ``max_workers`` allows episodes to
-        finish out of order. At most ``max_workers`` episodes are submitted at once. Each
-        episode keeps the same output-directory, recording, stage-selection, and error
-        behavior as :meth:`test`; an exception raised while preparing one episode stops
-        new submissions, waits for already-running episodes, and propagates to the caller.
-        Duplicate source identities are refused because concurrent writes to one test-run
-        directory are ambiguous.
+        The returned :class:`TestManyReport` preserves input order even when
+        ``max_workers`` allows episodes to finish out of order. ``on_progress`` receives
+        a :class:`TestManyProgress` on this coordinator thread immediately after each
+        episode completes; progress events follow completion order and carry the original
+        input index. At most ``max_workers`` episodes are submitted at once.
+
+        Each episode keeps the same output-directory, recording, stage-selection, and
+        error behavior as :meth:`test`; an exception raised while preparing one episode
+        or by ``on_progress`` stops new submissions, waits for already-running episodes,
+        and propagates to the caller. Duplicate source identities are refused because
+        concurrent writes to one test-run directory are ambiguous.
 
         ``verbose`` defaults to ``False`` so concurrent reports do not interleave on
         stdout. Use this for local corpus experiments; use :meth:`run` or a deployed
@@ -1990,10 +2057,12 @@ class App:
         concurrency_limit = _parse_concurrent_test_limit(max_workers)
         if isinstance(step_names, str):
             raise TypeError("step_names must be an iterable of names, not one string")
+        if on_progress is not None and not callable(on_progress):
+            raise TypeError("on_progress must be callable")
 
         episode_references = tuple(episodes)
         if not episode_references:
-            return []
+            return TestManyReport(reports=())
         source_reference_by_identity: dict[str, Path | str] = {}
         for episode_reference in episode_references:
             source_identity = self.source_identity(episode_reference)
@@ -2023,13 +2092,41 @@ class App:
                 _prepared_process_configuration=prepared_process_configuration,
             )
 
+        def report_completion(
+            input_index: int,
+            report: TestReport,
+            completed_count: int,
+            total_count: int,
+        ) -> None:
+            if on_progress is not None:
+                on_progress(
+                    TestManyProgress(
+                        input_index=input_index,
+                        completed_count=completed_count,
+                        total_count=total_count,
+                        report=report,
+                    )
+                )
+
         if concurrency_limit == 1:
-            return [test_episode(episode_reference) for episode_reference in episode_references]
-        return _run_with_bounded_concurrency(
+            sequential_reports: list[TestReport] = []
+            for input_index, episode_reference in enumerate(episode_references):
+                report = test_episode(episode_reference)
+                sequential_reports.append(report)
+                report_completion(
+                    input_index,
+                    report,
+                    len(sequential_reports),
+                    len(episode_references),
+                )
+            return TestManyReport(reports=tuple(sequential_reports))
+        reports = _run_with_bounded_concurrency(
             episode_references,
             test_episode,
             concurrency_limit=concurrency_limit,
+            on_completion=report_completion,
         )
+        return TestManyReport(reports=tuple(reports))
 
     def run(
         self,

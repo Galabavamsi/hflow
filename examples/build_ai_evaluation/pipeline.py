@@ -10,9 +10,7 @@ schemas, and parsers to Build AI's pinned Parquet frames through Inspect AI.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib
-import json
 import os
 import sys
 import threading
@@ -107,9 +105,8 @@ app = hflow.App(
 )
 
 
-def _check_version(task_definition: TaskDefinition) -> str:
+def _check_version(task_definition: TaskDefinition) -> hflow.StepVersion:
     version_contract = {
-        "contract": "build-ai-single-frame-v1",
         "task": task_definition.task.value,
         "prompt": task_definition.prompt,
         "response_schema": task_definition.response_schema,
@@ -120,9 +117,7 @@ def _check_version(task_definition: TaskDefinition) -> str:
         "camera": pipeline_configuration.camera,
         "frame_time_seconds": pipeline_configuration.frame_time_seconds,
     }
-    serialized_contract = json.dumps(version_contract, sort_keys=True, separators=(",", ":"))
-    contract_digest = hashlib.sha256(serialized_contract.encode()).hexdigest()[:16]
-    return f"build-ai-single-frame-v1-{contract_digest}"
+    return hflow.step_version_from_contract("build-ai-single-frame-v1", version_contract)
 
 
 _client_by_thread = threading.local()

@@ -79,7 +79,7 @@ def test_a_pipeline_that_registers_nothing_still_records_evidence(
         "content_digest": "1",
         "media_digest": "1",
     }
-    duration = next(run for run in report.checks if run.check.name == "episode_duration")
+    duration = report.check("episode_duration")
     assert duration.result is not None
     assert duration.result.measurements["duration_s"] == pytest.approx(1.0, abs=0.2)
 
@@ -651,7 +651,7 @@ def test_camera_frame_stats_emits_exactly_the_documented_measurements(
     CI instead of recording a plausible wrong number."""
     source = synthesize_episode(tmp_path / "value_source.mcap", spec)
     report = hflow.App("value-fixture", data_root=tmp_path / "data").test(source, verbose=False)
-    run = next(r for r in report.checks if r.check.name == "camera_frame_stats")
+    run = report.check("camera_frame_stats")
     assert run.result is not None
 
     pinned: dict[str, object] = {}
@@ -705,7 +705,7 @@ def test_a_single_stamp_camera_topic_errors_before_any_measurement(
         SyntheticEpisodeSpec(duration_s=1.0, image_hz=1.0, cameras=("wrist_cam",)),
     )
     report = hflow.App("single-stamp", data_root=tmp_path / "data").test(source, verbose=False)
-    run = next(r for r in report.checks if r.check.name == "camera_frame_stats")
+    run = report.check("camera_frame_stats")
     assert run.result is None
     assert "at least 2" in (run.error or "")
 
@@ -743,7 +743,7 @@ def test_the_body_emits_what_the_fact_names_even_when_the_fact_withdraws_one(
     monkeypatch.setattr(hflow.checks, "_camera_frame_stats_keys", poisoned)
 
     report = hflow.App("poison", data_root=tmp_path / "data").test(camera_source, verbose=False)
-    run = next(r for r in report.checks if r.check.name == "camera_frame_stats")
+    run = report.check("camera_frame_stats")
     assert run.result is not None
 
     from hflow.episode import Episode
@@ -781,7 +781,7 @@ def test_a_key_nobody_branches_on_raises_instead_of_appending_null(
     report = hflow.App("unknown-key", data_root=tmp_path / "data").test(
         camera_source, verbose=False
     )
-    run = next(r for r in report.checks if r.check.name == "camera_frame_stats")
+    run = report.check("camera_frame_stats")
     assert run.result is None
     assert run.error is not None
     assert "no branch" in run.error
@@ -818,8 +818,8 @@ def test_declared_expected_hz_wins_and_median_delta_fills_in(tmp_path: Path) -> 
 
     declared_report = declared_app.test(source, verbose=False)
 
-    baseline_run = next(r for r in baseline_report.checks if r.check.name == "camera_frame_stats")
-    declared_run = next(r for r in declared_report.checks if r.check.name == "camera_health")
+    baseline_run = baseline_report.check("camera_frame_stats")
+    declared_run = declared_report.check("camera_health")
     assert baseline_run.result is not None
     assert declared_run.result is not None
 
@@ -1029,7 +1029,7 @@ def test_episode_duration_emits_exactly_the_documented_measurements(
     restating the synthetic topology."""
     source = synthesize_episode(tmp_path / "duration_source.mcap", spec)
     report = hflow.App("duration-fixture", data_root=tmp_path / "data").test(source, verbose=False)
-    run = next(r for r in report.checks if r.check.name == "episode_duration")
+    run = report.check("episode_duration")
     assert run.result is not None
 
     pinned = dict(expected_subset)
@@ -1066,7 +1066,7 @@ def test_episode_duration_withdraws_a_key_when_the_fact_does(
     report = hflow.App("duration-poison", data_root=tmp_path / "data").test(
         source_episode, verbose=False
     )
-    run = next(r for r in report.checks if r.check.name == "episode_duration")
+    run = report.check("episode_duration")
     assert run.result is not None
     assert "message_count_total" not in run.result.measurements
     assert "duration_s" in run.result.measurements
@@ -1132,7 +1132,7 @@ def test_timestamp_regularity_emits_exactly_the_documented_measurements(
     """
     source = synthesize_episode(tmp_path / "ts_source.mcap", spec)
     report = hflow.App("ts-fixture", data_root=tmp_path / "data").test(source, verbose=False)
-    run = next(r for r in report.checks if r.check.name == "timestamp_regularity")
+    run = report.check("timestamp_regularity")
     assert run.result is not None
 
     expected = dict(expected_subset)
@@ -1206,7 +1206,7 @@ def test_timestamp_regularity_withdraws_a_key_when_the_fact_does(
 
     monkeypatch.setattr(hflow.checks, "_timestamp_regularity_keys", poisoned)
     report = hflow.App("ts-poison", data_root=tmp_path / "data").test(source_episode, verbose=False)
-    run = next(r for r in report.checks if r.check.name == "timestamp_regularity")
+    run = report.check("timestamp_regularity")
     assert run.result is not None
     assert not any(k.endswith("/median_dt_s") for k in run.result.measurements)
     assert any(k.endswith("/max_gap_s") for k in run.result.measurements)
@@ -1223,7 +1223,7 @@ def test_timestamp_regularity_raises_on_an_unrecognised_key(
 
     monkeypatch.setattr(hflow.checks, "_timestamp_regularity_keys", haunted)
     report = hflow.App("ts-haunt", data_root=tmp_path / "data").test(source_episode, verbose=False)
-    run = next(r for r in report.checks if r.check.name == "timestamp_regularity")
+    run = report.check("timestamp_regularity")
     assert run.result is None
     assert run.error is not None
     assert "no branch" in run.error
@@ -1274,7 +1274,7 @@ def test_keyframe_interval_emits_exactly_the_documented_measurements(
     """
     source = synthesize_episode(tmp_path / "kf_source.mcap", spec)
     report = hflow.App("kf-fixture", data_root=tmp_path / "data").test(source, verbose=False)
-    run = next(r for r in report.checks if r.check.name == "keyframe_interval")
+    run = report.check("keyframe_interval")
     assert run.result is not None
     _assert_measurements_match_pinned(dict(run.result.measurements), expected_subset)
 
@@ -1291,7 +1291,7 @@ def test_keyframe_interval_withdraws_a_key_when_the_fact_does(
 
     monkeypatch.setattr(hflow.checks, "_keyframe_interval_keys", poisoned)
     report = hflow.App("kf-poison", data_root=tmp_path / "data").test(source_episode, verbose=False)
-    run = next(r for r in report.checks if r.check.name == "keyframe_interval")
+    run = report.check("keyframe_interval")
     assert run.result is not None
     assert not any(k.endswith("/max_keyframe_gap_s") for k in run.result.measurements)
     # source_episode is joints-only, so the camera set is empty and the
@@ -1334,7 +1334,7 @@ def test_content_digest_emits_exactly_the_documented_measurements(
     report = hflow.App("cd-fixture", data_root=tmp_path / "data").test(
         source_episode, verbose=False
     )
-    run = next(r for r in report.checks if r.check.name == "content_digest")
+    run = report.check("content_digest")
     assert run.result is not None
     measurements = dict(run.result.measurements)
     assert set(measurements) == {"content_digest"}
@@ -1459,7 +1459,7 @@ def test_content_digest_withdraws_a_key_when_the_fact_does(
     dict empty."""
     monkeypatch.setattr(hflow.checks, "_content_digest_keys", lambda _episode: set())
     report = hflow.App("cd-poison", data_root=tmp_path / "data").test(source_episode, verbose=False)
-    run = next(r for r in report.checks if r.check.name == "content_digest")
+    run = report.check("content_digest")
     assert run.result is not None
     assert run.result.measurements == {}
 
@@ -1500,7 +1500,7 @@ def test_media_digest_emits_exactly_the_documented_measurements(
 ) -> None:
     source = synthesize_episode(tmp_path / "md_source.mcap", spec)
     report = hflow.App("md-fixture", data_root=tmp_path / "data").test(source, verbose=False)
-    run = next(r for r in report.checks if r.check.name == "media_digest")
+    run = report.check("media_digest")
     assert run.result is not None
     measurements = dict(run.result.measurements)
 
@@ -1514,7 +1514,7 @@ def test_media_digest_emits_exactly_the_documented_measurements(
     expected = dict(expected_subset)
     app = hflow.App("md-pin", data_root=tmp_path / "data2")
     pin_report = app.test(source, verbose=False)
-    pin_run = next(r for r in pin_report.checks if r.check.name == "media_digest")
+    pin_run = pin_report.check("media_digest")
     assert pin_run.result is not None
     expected["/wrist_cam/compressed/media_digest"] = pin_run.result.measurements[
         "/wrist_cam/compressed/media_digest"
@@ -1537,7 +1537,7 @@ def test_media_digest_withdraws_a_key_when_the_fact_does(
 
     monkeypatch.setattr(hflow.checks, "_media_digest_keys", poisoned)
     report = hflow.App("md-poison", data_root=tmp_path / "data").test(source, verbose=False)
-    run = next(r for r in report.checks if r.check.name == "media_digest")
+    run = report.check("media_digest")
     assert run.result is not None
     assert not any(k.endswith("/media_bytes") for k in run.result.measurements)
     assert any(k.endswith("/media_digest") for k in run.result.measurements)

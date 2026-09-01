@@ -724,6 +724,42 @@ def test_step_version_changes_only_when_the_author_bumps_it() -> None:
     assert bumped.checks[0].version != before.checks[0].version
 
 
+def test_contract_step_versions_are_stable_and_change_with_the_contract() -> None:
+    first_contract = {
+        "model": "vision-model",
+        "prompt": "count the hands",
+        "labels": ["zero", "one", "two"],
+        "settings": {"temperature": 0.0, "max_tokens": 64},
+    }
+    equivalent_contract_with_different_container_order = {
+        "settings": {"max_tokens": 64, "temperature": 0.0},
+        "labels": ("zero", "one", "two"),
+        "prompt": "count the hands",
+        "model": "vision-model",
+    }
+    changed_contract = {**first_contract, "prompt": "count visible hands"}
+
+    first_version = hflow.step_version_from_contract("hand-count-v1", first_contract)
+    equivalent_version = hflow.step_version_from_contract(
+        "hand-count-v1",
+        equivalent_contract_with_different_container_order,
+    )
+    changed_version = hflow.step_version_from_contract("hand-count-v1", changed_contract)
+
+    assert first_version == equivalent_version
+    assert changed_version != first_version
+    assert str(first_version).startswith("hand-count-v1-")
+    assert len(hflow.fingerprint_contract(first_contract)) == 64
+
+
+@pytest.mark.parametrize("unsupported_value", (float("nan"), Path("prompt.txt")))
+def test_contract_fingerprints_refuse_values_outside_canonical_json(
+    unsupported_value: object,
+) -> None:
+    with pytest.raises((TypeError, ValueError), match=r"contract value at \$\.value"):
+        hflow.fingerprint_contract({"value": unsupported_value})
+
+
 def test_all_step_registration_surfaces_reject_invalid_versions() -> None:
     app = hflow.App("versions", data_root=Path("/tmp"), default_checks=())
 
