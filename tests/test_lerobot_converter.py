@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import urllib.request
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -255,6 +256,98 @@ def test_index_discovery_multi_camera_metadata(
     assert found["episodes"][0]["video_windows"]["observation.images.up"][
         "to_timestamp"
     ] == pytest.approx(2.0)
+
+
+def test_video_cache_distinguishes_file_indices_and_reuses_same_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    corpus = _build_fake_corpus(tmp_path)
+    camera_key = "observation.images.up"
+    dataset_source = prep.DatasetSource(repo_id="fake/repo", revision="abc", license="apache-2.0")
+
+    def episode_row(episode_index: int, video_file_index: int) -> dict:
+        return {
+            "episode_index": episode_index,
+            "task": f"task-{episode_index}",
+            "length": 1,
+            "data_chunk": "000",
+            "data_file": "000",
+            "data_from": 0,
+            "data_to": 1,
+            "video_windows": {
+                camera_key: {
+                    "chunk_index": "000",
+                    "file_index": f"{video_file_index:03d}",
+                    "from_timestamp": 0.0,
+                    "to_timestamp": 0.0,
+                }
+            },
+        }
+
+    source_archive = cast(
+        prep._SourceArchive,
+        {
+            **corpus,
+            "episodes": [episode_row(0, 0), episode_row(1, 1)],
+            "video_keys": [camera_key],
+        },
+    )
+    numeric_schemas = {
+        "observation.state": prep._NumericSchema(name="observation.state", dim=6),
+        "action": prep._NumericSchema(name="action", dim=6),
+    }
+    video_downloaded_urls: set[str] = set()
+    cache_path_by_url: dict[str, Path] = {}
+    converted_sources: list[bytes] = []
+
+    def fake_download(url: str, destination_path: Path, **_kwargs: object) -> None:
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        if "/videos/" in url:
+            if url in video_downloaded_urls:
+                raise AssertionError(f"source was downloaded twice: {url}")
+            video_downloaded_urls.add(url)
+            cache_path_by_url[url] = destination_path
+            destination_path.write_bytes(url.encode())
+            return
+        shutil.copy(tmp_path / "data" / "chunk-000" / "file-000.parquet", destination_path)
+
+    def fake_transcode(mp4_path: Path, *_args: object, **_kwargs: object) -> list[bytes]:
+        converted_sources.append(mp4_path.read_bytes())
+        return [b"access-unit"]
+
+    monkeypatch.setattr(prep, "_download_file", fake_download)
+    monkeypatch.setattr(prep, "_transcode_mp4_to_h264", fake_transcode)
+    monkeypatch.setattr(prep, "_get_video_pts_times", lambda path: [0])
+    monkeypatch.setattr(prep, "ffmpeg_version", lambda: "test-ffmpeg")
+    monkeypatch.setattr(
+        prep,
+        "write_canonical_episode",
+        lambda source_path, output_path, *_args, **_kwargs: shutil.copy(source_path, output_path),
+    )
+
+    for episode_index in (0, 1, 0):
+        prep._convert_single_episode(
+            source_archive=source_archive,
+            dataset_source=dataset_source,
+            output_dir=tmp_path / "output",
+            episode_index=episode_index,
+            camera_keys=(camera_key,),
+            numeric_schemas=numeric_schemas,
+            frames_per_second=30,
+        )
+
+    video_urls = [
+        "https://huggingface.co/datasets/fake/repo/resolve/abc/videos/"
+        "observation.images.up/chunk-000/file-000.mp4",
+        "https://huggingface.co/datasets/fake/repo/resolve/abc/videos/"
+        "observation.images.up/chunk-000/file-001.mp4",
+    ]
+    assert converted_sources == [
+        video_urls[0].encode(),
+        video_urls[1].encode(),
+        video_urls[0].encode(),
+    ]
+    assert cache_path_by_url[video_urls[0]] != cache_path_by_url[video_urls[1]]
 
 
 def test_camera_selection_validates_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
