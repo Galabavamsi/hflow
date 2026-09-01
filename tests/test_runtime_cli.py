@@ -14,7 +14,7 @@ import pytest
 import hflow
 from hflow.app import parse_pipeline_spec, resolve_pipeline_spec_for_rendering
 from hflow.cli import main
-from hflow.runtime import AirflowHealth, RuntimeConfig, render_bundle
+from hflow.runtime import AirflowDagRun, AirflowHealth, RuntimeConfig, render_bundle
 from hflow.runtime._client import AirflowClient, AirflowClientError, PasswordCredentials
 
 HEALTHY = AirflowHealth(
@@ -850,7 +850,7 @@ def test_ingest_uses_env_credentials_and_dag_id(
         profile: str = "full",
         online: bool = False,
         dag_run_id: str | None = None,
-    ) -> dict[str, str]:
+    ) -> AirflowDagRun:
         client_auth = self._auth
         assert isinstance(client_auth, PasswordCredentials)
         captured["credentials"] = (client_auth.username, client_auth.password)
@@ -858,7 +858,14 @@ def test_ingest_uses_env_credentials_and_dag_id(
         captured["uris"] = uris
         captured["profile"] = profile
         captured["online"] = online
-        return {"dag_run_id": "manual__test"}
+        return AirflowDagRun(
+            dag_run_id="manual__test",
+            state="queued",
+            logical_date=None,
+            start_date=None,
+            end_date=None,
+            conf={},
+        )
 
     monkeypatch.setattr(AirflowClient, "ingest", fake_ingest)
     exit_code = main(["ingest", "a.mcap", "sub/b.mcap", "--bundle-dir", str(bundle_dir)])
@@ -893,12 +900,19 @@ def test_ingest_targets_a_remote_endpoint_without_any_bundle(
         profile: str = "full",
         online: bool = False,
         dag_run_id: str | None = None,
-    ) -> dict[str, str]:
+    ) -> AirflowDagRun:
         captured["base_url"] = self.base_url
         captured["auth"] = self._auth
         captured["dag_id"] = dag_id
         captured["uris"] = uris
-        return {"dag_run_id": "manual__remote"}
+        return AirflowDagRun(
+            dag_run_id="manual__remote",
+            state="queued",
+            logical_date=None,
+            start_date=None,
+            end_date=None,
+            conf={},
+        )
 
     monkeypatch.setattr(AirflowClient, "ingest", fake_ingest)
     monkeypatch.setenv("HFLOW_AIRFLOW_TOKEN", "minted-token")
@@ -984,9 +998,16 @@ def test_explicit_bundle_dir_stays_local_even_with_remote_environment(
         profile: str = "full",
         online: bool = False,
         dag_run_id: str | None = None,
-    ) -> dict[str, str]:
+    ) -> AirflowDagRun:
         captured["base_url"] = self.base_url
-        return {"dag_run_id": "manual__local"}
+        return AirflowDagRun(
+            dag_run_id="manual__local",
+            state="queued",
+            logical_date=None,
+            start_date=None,
+            end_date=None,
+            conf={},
+        )
 
     monkeypatch.setattr(AirflowClient, "ingest", fake_ingest)
     assert main(["ingest", "a.mcap", "--bundle-dir", str(bundle_dir)]) == 0
@@ -1008,7 +1029,16 @@ def test_status_remote_reports_health_and_runs_without_a_bundle(
     monkeypatch.setattr(
         AirflowClient,
         "dag_runs",
-        lambda self, dag_id, **_kwargs: [{"dag_run_id": "manual__1", "state": "success"}],
+        lambda self, dag_id, **_kwargs: [
+            AirflowDagRun(
+                dag_run_id="manual__1",
+                state="success",
+                logical_date=None,
+                start_date=None,
+                end_date=None,
+                conf={},
+            )
+        ],
     )
     monkeypatch.setenv("HFLOW_AIRFLOW_URL", "https://workspace.example.com")
     monkeypatch.setenv("HFLOW_AIRFLOW_DAG_ID", "kitchen_ingest")
@@ -1037,10 +1067,17 @@ def test_ingest_plumbs_profile_lane_and_steps_into_conf(
         conf: dict[str, object] | None = None,
         *,
         dag_run_id: str | None = None,
-    ) -> dict[str, str]:
+    ) -> AirflowDagRun:
         captured["dag_id"] = dag_id
         captured["conf"] = conf
-        return {"dag_run_id": "manual__relabel"}
+        return AirflowDagRun(
+            dag_run_id="manual__relabel",
+            state="queued",
+            logical_date=None,
+            start_date=None,
+            end_date=None,
+            conf={},
+        )
 
     monkeypatch.setattr(AirflowClient, "trigger_dag_run", fake_trigger)
     exit_code = main(
