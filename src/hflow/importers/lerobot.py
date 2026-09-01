@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import os
+import re
 import struct
 import subprocess
 import tempfile
@@ -234,6 +235,8 @@ def _hf_repo_info(repo_id: str, revision: str) -> _DatasetRepositoryInformation:
         raise ValueError(
             f"Hugging Face did not resolve {repo_id}@{revision} to an immutable commit"
         )
+    if not re.fullmatch(r"[0-9a-f]{7,64}", resolved_revision):
+        raise ValueError(f"Hugging Face returned a malformed commit sha for {repo_id}@{revision}")
     card_data = repository_information.get("cardData")
     license_name = card_data.get("license") if isinstance(card_data, dict) else None
     return {
@@ -564,7 +567,7 @@ def import_lerobot_dataset(
         raise ValueError("camera_keys must not contain duplicates")
 
     repository_information = _hf_repo_info(normalized_dataset_repo, normalized_revision)
-    cache_directory = output_dir / "_lerobot_cache"
+    cache_directory = output_dir / "_lerobot_cache" / repository_information["sha"]
     source_archive = _ensure_source_archive(
         DatasetSource(
             repo_id=normalized_dataset_repo,

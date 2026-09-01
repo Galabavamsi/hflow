@@ -5,6 +5,7 @@ with a synthetic v3-style corpus, without asserting third-party
 implementation details or touching the network.
 """
 
+import io
 import json
 import shutil
 import subprocess
@@ -296,6 +297,72 @@ def test_camera_selection_validates_keys(tmp_path: Path, monkeypatch: pytest.Mon
         )
 
 
+def test_import_namespaces_source_cache_by_resolved_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved_shas = {"branch-a": "sha-a", "branch-b": "sha-b", "tag-a": "sha-a"}
+    cache_observations: list[tuple[str, Path, str]] = []
+
+    monkeypatch.setattr(
+        prep,
+        "_hf_repo_info",
+        lambda repo, revision: {"sha": resolved_shas[revision], "license": "apache-2.0"},
+    )
+
+    def fake_ensure_source_archive(dataset_source: prep.DatasetSource, cache_dir: Path) -> dict:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        source_marker = cache_dir / "source-marker.txt"
+        if not source_marker.exists():
+            source_marker.write_text(dataset_source.revision)
+        cache_observations.append((dataset_source.revision, cache_dir, source_marker.read_text()))
+        return {
+            "info": {},
+            "fps": 30,
+            "data_path": "data/{chunk_index}/{file_index}.parquet",
+            "video_path": "videos/{camera_key}/{chunk_index}/{file_index}.mp4",
+            "episodes": [],
+            "video_keys": [prep.DEFAULT_CAMERA_KEY],
+            "numeric_features": {
+                "action": {"dtype": "float32", "shape": [1]},
+                "observation.state": {"dtype": "float32", "shape": [1]},
+            },
+            "cache_dir": cache_dir,
+            "dataset": dataset_source,
+        }
+
+    monkeypatch.setattr(prep, "_ensure_source_archive", fake_ensure_source_archive)
+
+    for revision in ("branch-a", "branch-b", "tag-a"):
+        prep.import_lerobot_dataset(
+            dataset_repo="fake/repo", revision=revision, output_dir=tmp_path
+        )
+
+    assert cache_observations == [
+        ("sha-a", tmp_path / "_lerobot_cache" / "sha-a", "sha-a"),
+        ("sha-b", tmp_path / "_lerobot_cache" / "sha-b", "sha-b"),
+        ("sha-a", tmp_path / "_lerobot_cache" / "sha-a", "sha-a"),
+    ]
+    assert sorted(path.name for path in (tmp_path / "_lerobot_cache").iterdir()) == [
+        "sha-a",
+        "sha-b",
+    ]
+
+
+@pytest.mark.parametrize("resolved_sha", ["../../evil", "/tmp/probe-328-absolute"])
+def test_hf_repo_info_rejects_malformed_commit_sha(
+    resolved_sha: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    response_body = json.dumps({"sha": resolved_sha, "cardData": {"license": "apache-2.0"}})
+    monkeypatch.setattr(
+        prep.urllib.request,
+        "urlopen",
+        lambda request, timeout: io.BytesIO(response_body.encode()),
+    )
+
+    with pytest.raises(ValueError, match="malformed commit sha"):
+        prep._hf_repo_info("fake/repo", "main")
+
+
 def test_import_refuses_invalid_arguments_before_network(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="dataset_repo must not be empty"):
         prep.import_lerobot_dataset(dataset_repo="", output_dir=tmp_path)
@@ -522,10 +589,12 @@ def test_fetch_info_json_malformed_json_raises_contextual_value_error(
 
 
 def test_hf_repo_info_valid_json_still_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
-    body = json.dumps({"sha": "abc123", "cardData": {"license": "apache-2.0"}}).encode()
+    # A real resolved commit sha: at least the 7 hex characters the sha
+    # validation requires, since a cache directory is named after it.
+    body = json.dumps({"sha": "abc1234", "cardData": {"license": "apache-2.0"}}).encode()
     _stub_urlopen(monkeypatch, {"/api/datasets/": body})
     assert prep._hf_repo_info("lerobot/pusht", "main") == {
-        "sha": "abc123",
+        "sha": "abc1234",
         "license": "apache-2.0",
     }
 
