@@ -414,11 +414,10 @@ def outstanding_stage_uris(
         return []
     from hflow.stage_execution import resolve_episode_reference
 
+    validated_uris = [parse_data_root_relative_uri(str(uri)) for uri in uris]
     identity_by_uri = {
-        uri: application.source_identity(
-            resolve_episode_reference(data_root, parse_data_root_relative_uri(str(uri)))
-        )
-        for uri in uris
+        uri: application.source_identity(resolve_episode_reference(data_root, uri))
+        for uri in validated_uris
     }
     plans = plan_outstanding_stages(
         application,
@@ -428,7 +427,7 @@ def outstanding_stage_uris(
     )
     return [
         uri
-        for uri in uris
+        for uri in validated_uris
         if not isinstance(plan := plans.get(identity_by_uri[uri]), OutstandingStages)
         or stage in plan.stages
     ]

@@ -23,6 +23,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from posixpath import normpath
 from typing import TYPE_CHECKING, TypedDict
 
 from hflow.batching import plan_batches
@@ -210,12 +211,16 @@ def plan_stage_batches(
         ingest_mode = IngestMode(mode)
     except ValueError:
         raise ValueError(f"unknown mode {mode!r}; valid modes: {', '.join(IngestMode)}") from None
-    if not uris:
+    validated_uris = [parse_data_root_relative_uri(str(uri)) for uri in uris]
+    if not validated_uris:
         return []
     if ingest_mode is IngestMode.ONLINE:
-        return [{"items": [str(uri) for uri in uris], "start_delay_s": 0.0}]
+        return [{"items": [str(uri) for uri in validated_uris], "start_delay_s": 0.0}]
     data_root_storage = parse_storage_root(data_root)
-    item_sizes = {str(uri): data_root_storage.file_size(str(uri)) for uri in uris}
+    item_sizes = {
+        str(uri): data_root_storage.file_size(normpath(str(uri).replace("\\", "/")))
+        for uri in validated_uris
+    }
     resolved_batch_count = (
         int(batch_count)
         if batch_count is not None

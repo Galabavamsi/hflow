@@ -21,10 +21,13 @@ def parse_data_root_relative_uri(uri: str) -> DataRootRelativeUri:
     if not candidate:
         raise ValueError("every uri must be a non-empty string")
     windows_path = PureWindowsPath(candidate)
-    if candidate.startswith("/") or windows_path.drive:
+    if candidate.startswith("/") or windows_path.anchor:
         raise ValueError(f"{candidate!r} is not relative to the data root")
 
-    normalized = normpath(candidate)
+    # URI separators are POSIX-style, but accepting a Windows spelling on one
+    # machine must not turn into a parent escape on another. Preserve the
+    # candidate itself; normalize only this containment check.
+    normalized = normpath(candidate.replace("\\", "/"))
     if normalized == ".." or normalized.startswith("../"):
         raise ValueError(f"{candidate!r} is not relative to the data root")
 

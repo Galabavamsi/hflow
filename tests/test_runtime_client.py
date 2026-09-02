@@ -372,7 +372,10 @@ def test_ingest_refuses_a_batch_count_the_run_could_not_honour(stub_server: str)
     assert _StubAirflowHandler.requests_seen == []
 
 
-@pytest.mark.parametrize("uri", ["   ", "/etc/passwd", "../outside.mcap"])
+@pytest.mark.parametrize(
+    "uri",
+    ["   ", "/etc/passwd", "../outside.mcap", r"\episodes-in\a.mcap", r"a\..\..\outside.mcap"],
+)
 def test_ingest_rejects_invalid_uri_before_making_http_requests(stub_server: str, uri: str) -> None:
     client = AirflowClient(stub_server, "airflow", "right-password")
 
