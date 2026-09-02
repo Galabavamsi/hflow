@@ -327,6 +327,7 @@ def test_ingest_validates_profile_and_mode_before_touching_any_runtime(
         "/api/v1/runtime/ingest", json={"uris": ["   "], "profile": "full", "mode": "batch"}
     )
     assert blank_uri.status_code == 400
+    assert "configured data root" in blank_uri.json()["detail"]
 
     no_uris = client.post(
         "/api/v1/runtime/ingest", json={"uris": [], "profile": "full", "mode": "batch"}
@@ -396,7 +397,7 @@ def test_ingest_triggers_the_master_dag(
     monkeypatch.setattr(AirflowClient, "ingest", fake_ingest)
     response = bundle_api.post(
         "/api/v1/runtime/ingest",
-        json={"uris": ["a.mcap", "sub/b.mcap"], "profile": "relabel", "mode": "online"},
+        json={"uris": ["  a.mcap  ", "sub/b.mcap"], "profile": "relabel", "mode": "online"},
     )
     assert response.status_code == 200
     assert response.json() == {"dag_run_id": "manual__ui", "state": "queued"}

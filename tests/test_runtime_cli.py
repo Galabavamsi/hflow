@@ -670,7 +670,7 @@ def test_ingest_uses_env_credentials_and_dag_id(
         )
 
     monkeypatch.setattr(AirflowClient, "ingest", fake_ingest)
-    exit_code = main(["ingest", "a.mcap", "sub/b.mcap", "--bundle-dir", str(bundle_dir)])
+    exit_code = main(["ingest", "  a.mcap  ", "sub/b.mcap", "--bundle-dir", str(bundle_dir)])
     assert exit_code == 0
     assert captured["credentials"] == ("airflow", env_values["AIRFLOW_ADMIN_PASSWORD"])
     assert captured["dag_id"] == "demo_pipeline_ingest"
@@ -930,6 +930,42 @@ def test_ingest_rejects_uris_outside_data_root(
 
     assert exit_code == 2
     assert "is not relative to the data root" in capsys.readouterr().err
+
+
+def test_ingest_rejects_blank_uri_before_triggering(
+    monkeypatch: pytest.MonkeyPatch,
+    pipeline_file: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bundle_dir = _rendered_bundle(tmp_path, pipeline_file)
+    called = False
+
+    def fake_ingest(
+        self: AirflowClient,
+        dag_id: str,
+        uris: list[str],
+        *,
+        profile: str = "full",
+        online: bool = False,
+        dag_run_id: str | None = None,
+    ) -> AirflowDagRun:
+        nonlocal called
+        called = True
+        return AirflowDagRun(
+            dag_run_id="manual__unexpected",
+            state="queued",
+            logical_date=None,
+            start_date=None,
+            end_date=None,
+            conf={},
+        )
+
+    monkeypatch.setattr(AirflowClient, "ingest", fake_ingest)
+
+    assert main(["ingest", "   ", "--bundle-dir", str(bundle_dir)]) == 2
+    assert not called
+    assert "non-empty" in capsys.readouterr().err
 
 
 def test_start_runtime_waits_for_all_five_dags(

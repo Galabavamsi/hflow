@@ -372,6 +372,74 @@ def test_ingest_refuses_a_batch_count_the_run_could_not_honour(stub_server: str)
     assert _StubAirflowHandler.requests_seen == []
 
 
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "   ",
+        "/etc/passwd",
+        "../outside.mcap",
+        r"\episodes-in\a.mcap",
+        r"episodes-in\a.mcap",
+        r"a\..\..\outside.mcap",
+        # Windows anchors with forward slashes: no backslash to catch them, so
+        # these reach the anchor check rather than the separator check. Main
+        # accepted all three at every entry point.
+        "C:/windows/system32/a.mcap",
+        "C:a.mcap",
+        "//server/share/a.mcap",
+    ],
+)
+def test_ingest_rejects_invalid_uri_before_making_http_requests(stub_server: str, uri: str) -> None:
+    client = AirflowClient(stub_server, "airflow", "right-password")
+
+    with pytest.raises(ValueError):
+        client.ingest("pipeline_ingest", [uri])
+
+    assert _StubAirflowHandler.requests_seen == []
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "episodes-in/run_0001.mcap",
+        # Not a drive: two letters before the colon. A coarser "contains a
+        # colon" or "second character is a colon" rule would refuse these,
+        # and they are legal relative paths on a POSIX data root.
+        "CC:/notadrive/a.mcap",
+        "file:with:colons.mcap",
+        # A safe internal segment: refused would be wrong, and rewriting it to
+        # 'b.mcap' would change the persisted identity (#314 non-goal).
+        "a/../b.mcap",
+    ],
+)
+def test_ingest_accepts_safe_uris_unchanged(stub_server: str, uri: str) -> None:
+    client = AirflowClient(stub_server, "airflow", "right-password")
+
+    client.ingest("pipeline_ingest", [uri])
+
+    trigger_request = next(
+        entry for entry in _StubAirflowHandler.requests_seen if entry[1].endswith("/dagRuns")
+    )
+    assert trigger_request[2] == {
+        "logical_date": None,
+        "conf": {"uris": [uri], "profile": "full", "mode": "batch"},
+    }
+
+
+def test_ingest_trims_surrounding_uri_whitespace_in_trigger_conf(stub_server: str) -> None:
+    client = AirflowClient(stub_server, "airflow", "right-password")
+
+    client.ingest("pipeline_ingest", ["  a.mcap  "])
+
+    trigger_request = next(
+        entry for entry in _StubAirflowHandler.requests_seen if entry[1].endswith("/dagRuns")
+    )
+    assert trigger_request[2] == {
+        "logical_date": None,
+        "conf": {"uris": ["a.mcap"], "profile": "full", "mode": "batch"},
+    }
+
+
 def test_ingest_serializes_selected_step_names(stub_server: str) -> None:
     client = AirflowClient(stub_server, "airflow", "right-password")
 

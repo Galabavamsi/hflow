@@ -586,6 +586,9 @@ class TestFilteringAScheduledStagesUris:
 
         assert self._filter(project, hflow.Stage.META) == [EPISODE_URI]
 
+    def test_filter_returns_trimmed_uris(self, project: Path) -> None:
+        assert self._filter(project, hflow.Stage.META, f"  {EPISODE_URI}  ") == [EPISODE_URI]
+
     def test_a_check_added_afterwards_makes_it_outstanding_again(self, project: Path) -> None:
         _ingest(project)
         (project / "pipeline.py").write_text(

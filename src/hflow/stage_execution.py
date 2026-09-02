@@ -23,6 +23,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from posixpath import normpath
 from typing import TYPE_CHECKING, TypedDict
 
 from hflow.batching import plan_batches
@@ -42,6 +43,7 @@ from hflow.step_selection import (
 )
 from hflow.steps import IngestMode, Stage
 from hflow.storage import is_bucket_url, parse_storage_root
+from hflow.uri import DataRootRelativeUri, parse_data_root_relative_uri
 
 if TYPE_CHECKING:
     from hflow.app import App
@@ -128,10 +130,10 @@ def require_application_data_root(application: "App", expected_data_root: str) -
         )
 
 
-def resolve_episode_reference(data_root: str, uri: str) -> "Path | str":
+def resolve_episode_reference(data_root: str, uri: DataRootRelativeUri) -> "Path | str":
     """A conf URI (relative to the data root) as a processable reference."""
     if is_bucket_url(data_root):
-        return data_root.rstrip("/") + "/" + uri.lstrip("/")
+        return data_root.rstrip("/") + "/" + uri
     return Path(data_root) / uri
 
 
@@ -209,12 +211,18 @@ def plan_stage_batches(
         ingest_mode = IngestMode(mode)
     except ValueError:
         raise ValueError(f"unknown mode {mode!r}; valid modes: {', '.join(IngestMode)}") from None
-    if not uris:
+    validated_uris = [parse_data_root_relative_uri(str(uri)) for uri in uris]
+    if not validated_uris:
         return []
     if ingest_mode is IngestMode.ONLINE:
-        return [{"items": [str(uri) for uri in uris], "start_delay_s": 0.0}]
+        return [{"items": [str(uri) for uri in validated_uris], "start_delay_s": 0.0}]
     data_root_storage = parse_storage_root(data_root)
-    item_sizes = {str(uri): data_root_storage.file_size(str(uri)) for uri in uris}
+    # The conf keeps the URI's own spelling, so `a/../b.mcap` stays the
+    # identity; only the size lookup normalizes, because a storage key is
+    # validated for containment and would refuse the literal segments.
+    item_sizes = {
+        str(uri): data_root_storage.file_size(normpath(str(uri))) for uri in validated_uris
+    }
     resolved_batch_count = (
         int(batch_count)
         if batch_count is not None
@@ -286,7 +294,9 @@ def process_stage_batch(
     ) as quarantine_history:
         for uri in uris:
             try:
-                episode_reference = resolve_episode_reference(data_root, str(uri))
+                episode_reference = resolve_episode_reference(
+                    data_root, parse_data_root_relative_uri(str(uri))
+                )
                 if isinstance(registered_step_selection, AllRegisteredSteps):
                     report = application.process(
                         episode_reference,
@@ -487,7 +497,9 @@ def _plan_after_sync(
 
     data_root = str(application.data_root)
     identity_by_uri = {
-        str(uri): application.source_identity(resolve_episode_reference(data_root, str(uri)))
+        str(uri): application.source_identity(
+            resolve_episode_reference(data_root, parse_data_root_relative_uri(str(uri)))
+        )
         for uri in uris
     }
     plans = plan_outstanding_stages(

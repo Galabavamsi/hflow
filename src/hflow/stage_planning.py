@@ -45,6 +45,7 @@ from hflow.step_selection import (
     registered_step_is_selected,
 )
 from hflow.steps import RAN_STATUSES, SETTLED_STATUSES, Stage
+from hflow.uri import parse_data_root_relative_uri
 
 if TYPE_CHECKING:
     import duckdb
@@ -413,9 +414,10 @@ def outstanding_stage_uris(
         return []
     from hflow.stage_execution import resolve_episode_reference
 
+    validated_uris = [parse_data_root_relative_uri(str(uri)) for uri in uris]
     identity_by_uri = {
-        uri: application.source_identity(resolve_episode_reference(data_root, str(uri)))
-        for uri in uris
+        uri: application.source_identity(resolve_episode_reference(data_root, uri))
+        for uri in validated_uris
     }
     plans = plan_outstanding_stages(
         application,
@@ -424,8 +426,8 @@ def outstanding_stage_uris(
         step_names=step_names,
     )
     return [
-        uri
-        for uri in uris
+        str(uri)
+        for uri in validated_uris
         if not isinstance(plan := plans.get(identity_by_uri[uri]), OutstandingStages)
         or stage in plan.stages
     ]

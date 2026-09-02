@@ -50,7 +50,7 @@ def test_ingest_without_a_runtime_processes_and_records(
     monkeypatch.delenv("HFLOW_AIRFLOW_URL", raising=False)
     monkeypatch.chdir(project)
 
-    assert cli_main(["ingest", "episodes-in/episode_0001.mcap"]) == 0
+    assert cli_main(["ingest", "  episodes-in/episode_0001.mcap  "]) == 0
 
     printed = capsys.readouterr()
     assert "no runtime addressed" in printed.err

@@ -10,6 +10,7 @@ import pytest
 
 import hflow
 from hflow import stage_execution
+from hflow.runtime import parse_data_root_relative_uri
 from hflow.stage_execution import (
     StageBatchCounts,
     load_pipeline_application,
@@ -85,6 +86,15 @@ class TestLanePlanning:
         assert sorted(items_by_batch[1]["items"]) == ["small-1.mcap", "small-2.mcap"]
         assert {batch["start_delay_s"] for batch in batches} == {0.0, 2.0}
 
+    def test_batch_lane_trims_uri_and_sizes_safe_internal_segments(self, tmp_path: Path) -> None:
+        (tmp_path / "b.mcap").write_bytes(b"episode")
+
+        batches = plan_stage_batches(
+            ["  a/../b.mcap  "], mode="batch", batch_count=None, data_root=str(tmp_path)
+        )
+
+        assert batches == [{"items": ["a/../b.mcap"], "start_delay_s": 0.0}]
+
     def test_empty_uris_plan_nothing(self, tmp_path: Path) -> None:
         assert plan_stage_batches([], mode="batch", batch_count=None, data_root=str(tmp_path)) == []
 
@@ -117,13 +127,18 @@ class TestConfFlags:
 
 class TestEpisodeReferences:
     def test_bucket_root_joins_as_url_and_local_as_path(self) -> None:
+        uri = parse_data_root_relative_uri("episodes-in/a.mcap")
         assert (
-            resolve_episode_reference("gs://bucket/prefix", "episodes-in/a.mcap")
+            resolve_episode_reference("gs://bucket/prefix", uri)
             == "gs://bucket/prefix/episodes-in/a.mcap"
         )
-        assert resolve_episode_reference("/opt/airflow/data", "episodes-in/a.mcap") == Path(
+        assert resolve_episode_reference("/opt/airflow/data", uri) == Path(
             "/opt/airflow/data/episodes-in/a.mcap"
         )
+
+    def test_a_leading_slash_is_rejected_before_resolution(self) -> None:
+        with pytest.raises(ValueError, match="relative to the data root"):
+            parse_data_root_relative_uri("/episodes-in/a.mcap")
 
 
 class TestPipelineLoading:
