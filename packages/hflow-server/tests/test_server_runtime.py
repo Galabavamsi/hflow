@@ -396,7 +396,7 @@ def test_ingest_triggers_the_master_dag(
     monkeypatch.setattr(AirflowClient, "ingest", fake_ingest)
     response = bundle_api.post(
         "/api/v1/runtime/ingest",
-        json={"uris": ["a.mcap", "sub/b.mcap"], "profile": "relabel", "mode": "online"},
+        json={"uris": ["  a.mcap  ", "sub/b.mcap"], "profile": "relabel", "mode": "online"},
     )
     assert response.status_code == 200
     assert response.json() == {"dag_run_id": "manual__ui", "state": "queued"}

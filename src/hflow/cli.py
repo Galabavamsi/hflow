@@ -1150,28 +1150,27 @@ def _print_ingest_failure_hint() -> None:
 
 
 def _command_ingest(arguments: argparse.Namespace) -> int:
-    from posixpath import normpath
-
     from hflow.runtime import (
         AirflowClientError,
         client_for_bundle,
         client_for_endpoint,
         load_bundle,
+        parse_data_root_relative_uri,
     )
 
     # URIs resolve against the runtime's data root; absolute host paths and
     # ../ escapes cannot work there, so fail before triggering.
-    for uri in arguments.uris:
-        if uri.startswith("/") or normpath(uri).startswith(".."):
-            print(
-                f"ingest: {uri!r} is not relative to the data root -- URIs are "
-                f"resolved against the workspace this project uses ({_environment_data_root()}), "
-                "so name them from there (e.g. `episodes-in/run_0001.mcap`). "
-                f"Set $HFLOW_DATA_ROOT or {PROJECT_CONFIG_FILE_NAME}'s data_root "
-                "to point at another workspace",
-                file=sys.stderr,
-            )
-            return 2
+    try:
+        uris = [parse_data_root_relative_uri(uri) for uri in arguments.uris]
+    except ValueError as error:
+        print(
+            f"ingest: {error} -- URIs are resolved against the workspace this project uses "
+            f"({_environment_data_root()}), so name them from there "
+            "(e.g. `episodes-in/run_0001.mcap`). "
+            f"Set $HFLOW_DATA_ROOT or {PROJECT_CONFIG_FILE_NAME}'s data_root",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         endpoint = _remote_endpoint_for_command(arguments)
@@ -1189,6 +1188,7 @@ def _command_ingest(arguments: argparse.Namespace) -> int:
             # Airflow is several GB of images and services, far too much to
             # do on someone's behalf inside an ordinary ingest, and far more
             # than a handful of episodes needs.
+            arguments.uris = uris
             return _ingest_in_process(arguments)
         try:
             paths = load_bundle(bundle_dir)
@@ -1202,14 +1202,14 @@ def _command_ingest(arguments: argparse.Namespace) -> int:
         if arguments.step_names is None:
             dag_run = client.ingest(
                 dag_id,
-                list(arguments.uris),
+                [str(uri) for uri in uris],
                 profile=arguments.profile,
                 online=arguments.online,
             )
         else:
             dag_run = client.ingest(
                 dag_id,
-                list(arguments.uris),
+                [str(uri) for uri in uris],
                 profile=arguments.profile,
                 online=arguments.online,
                 step_names=arguments.step_names,

@@ -372,6 +372,30 @@ def test_ingest_refuses_a_batch_count_the_run_could_not_honour(stub_server: str)
     assert _StubAirflowHandler.requests_seen == []
 
 
+@pytest.mark.parametrize("uri", ["   ", "/etc/passwd", "../outside.mcap"])
+def test_ingest_rejects_invalid_uri_before_making_http_requests(stub_server: str, uri: str) -> None:
+    client = AirflowClient(stub_server, "airflow", "right-password")
+
+    with pytest.raises(ValueError):
+        client.ingest("pipeline_ingest", [uri])
+
+    assert _StubAirflowHandler.requests_seen == []
+
+
+def test_ingest_trims_surrounding_uri_whitespace_in_trigger_conf(stub_server: str) -> None:
+    client = AirflowClient(stub_server, "airflow", "right-password")
+
+    client.ingest("pipeline_ingest", ["  a.mcap  "])
+
+    trigger_request = next(
+        entry for entry in _StubAirflowHandler.requests_seen if entry[1].endswith("/dagRuns")
+    )
+    assert trigger_request[2] == {
+        "logical_date": None,
+        "conf": {"uris": ["a.mcap"], "profile": "full", "mode": "batch"},
+    }
+
+
 def test_ingest_serializes_selected_step_names(stub_server: str) -> None:
     client = AirflowClient(stub_server, "airflow", "right-password")
 
