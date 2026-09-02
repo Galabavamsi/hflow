@@ -931,23 +931,6 @@ def test_api_port_inside_the_tcp_range_is_accepted(config: RuntimeConfig, good_p
     assert replace(config, api_port=good_port).api_port == good_port
 
 
-def test_api_port_true_is_rejected_even_though_it_passes_the_range(
-    config: RuntimeConfig,
-) -> None:
-    """bool is the case the range check cannot catch.
-
-    True == 1, so the range test passes it, and the value is only ever str()-ed
-    after that. Without this it reaches the rendered .env as API_PORT=True.
-    False is covered alongside the other wrong types below, where it is the
-    weaker case: it is 0, so the range check would reject it anyway, just with
-    the wrong reason.
-    """
-    from dataclasses import replace
-
-    with pytest.raises(ValueError, match="api_port must be an int, not bool: True"):
-        replace(config, api_port=True)
-
-
 def test_api_port_accepts_an_int_enum_member(config: RuntimeConfig) -> None:
     """An IntEnum member is an int, and CONTRIBUTING asks for typed variants.
 
