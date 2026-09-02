@@ -414,7 +414,11 @@ def create_runtime_router(settings: ServerSettings, resolver: RuntimeResolver) -
         try:
             uris = [str(parse_data_root_relative_uri(uri)) for uri in request.uris]
         except ValueError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from error
+            detail = (
+                f"{error} -- URIs are resolved against the runtime's configured data root "
+                "(e.g. episodes-in/run_0001.mcap)"
+            )
+            raise HTTPException(status_code=400, detail=detail) from error
         if request.profile not in RUN_PROFILES:
             raise HTTPException(
                 status_code=400,

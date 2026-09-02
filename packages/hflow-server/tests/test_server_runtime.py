@@ -327,6 +327,7 @@ def test_ingest_validates_profile_and_mode_before_touching_any_runtime(
         "/api/v1/runtime/ingest", json={"uris": ["   "], "profile": "full", "mode": "batch"}
     )
     assert blank_uri.status_code == 400
+    assert "configured data root" in blank_uri.json()["detail"]
 
     no_uris = client.post(
         "/api/v1/runtime/ingest", json={"uris": [], "profile": "full", "mode": "batch"}

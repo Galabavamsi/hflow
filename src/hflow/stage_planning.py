@@ -426,7 +426,7 @@ def outstanding_stage_uris(
         step_names=step_names,
     )
     return [
-        uri
+        str(uri)
         for uri in validated_uris
         if not isinstance(plan := plans.get(identity_by_uri[uri]), OutstandingStages)
         or stage in plan.stages
