@@ -217,9 +217,11 @@ def plan_stage_batches(
     if ingest_mode is IngestMode.ONLINE:
         return [{"items": [str(uri) for uri in validated_uris], "start_delay_s": 0.0}]
     data_root_storage = parse_storage_root(data_root)
+    # The conf keeps the URI's own spelling, so `a/../b.mcap` stays the
+    # identity; only the size lookup normalizes, because a storage key is
+    # validated for containment and would refuse the literal segments.
     item_sizes = {
-        str(uri): data_root_storage.file_size(normpath(str(uri).replace("\\", "/")))
-        for uri in validated_uris
+        str(uri): data_root_storage.file_size(normpath(str(uri))) for uri in validated_uris
     }
     resolved_batch_count = (
         int(batch_count)
