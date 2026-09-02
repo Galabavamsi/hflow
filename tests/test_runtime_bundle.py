@@ -575,6 +575,61 @@ def test_xcom_objectstorage_url_override(config: RuntimeConfig, tmp_path: Path) 
     )
 
 
+def test_xcom_objectstorage_url_cannot_inject_a_sibling_environment_key(
+    config: RuntimeConfig, tmp_path: Path
+) -> None:
+    """xcom_objectstorage_url is substituted into an unquoted-looking YAML
+    scalar in COMPOSE_TEMPLATE. A value containing a newline followed by
+    the block's own indentation can otherwise be parsed as a new sibling
+    key in x-airflow-common.environment, letting an override value
+    overwrite an unrelated key (verified: AIRFLOW__CORE__LOAD_EXAMPLES can
+    be flipped from 'false' to 'true' this way against the unescaped
+    form). The value must be escaped the same way _compose_path_scalar
+    escapes other substitutions into this template, so an embedded
+    newline and colon stay part of one literal string value.
+    """
+    from dataclasses import replace
+
+    injection_payload = "s3://foo/bar\n    AIRFLOW__CORE__LOAD_EXAMPLES: 'true'"
+
+    _, compose = _render(
+        replace(config, xcom_objectstorage_url=injection_payload),
+        tmp_path / "bundle",
+    )
+    scheduler_env = compose["services"]["airflow-scheduler"]["environment"]
+
+    # The pre-existing key must be unaffected by the injected payload.
+    assert scheduler_env["AIRFLOW__CORE__LOAD_EXAMPLES"] == "false"
+    # The payload is preserved as one literal string value, not parsed as
+    # a second key. (Single-quoted YAML scalars fold embedded line breaks
+    # to spaces per the YAML spec, so the round-tripped value has a space
+    # where the payload had a newline; that's expected, not data loss the
+    # way a rejected/truncated value would be.)
+    xcom_path = scheduler_env["AIRFLOW__COMMON_IO__XCOM_OBJECTSTORAGE_PATH"]
+    assert "s3://foo/bar" in xcom_path
+    assert "AIRFLOW__CORE__LOAD_EXAMPLES: 'true'" in xcom_path
+
+
+def test_xcom_objectstorage_url_escapes_compose_interpolation(
+    config: RuntimeConfig, tmp_path: Path
+) -> None:
+    """The other half of the escaping: Compose interpolates ${VAR} even inside
+    single-quoted YAML scalars, so a literal ``$`` has to reach the container
+    as ``$$`` in the file. Without this the store URL would silently become
+    whatever the launch shell had in that variable, or empty."""
+    from dataclasses import replace
+
+    _, compose = _render(
+        replace(config, xcom_objectstorage_url="s3://bucket/${HOME}/xcom"),
+        tmp_path / "bundle",
+    )
+    scheduler_env = compose["services"]["airflow-scheduler"]["environment"]
+
+    assert (
+        scheduler_env["AIRFLOW__COMMON_IO__XCOM_OBJECTSTORAGE_PATH"] == "s3://bucket/$${HOME}/xcom"
+    )
+
+
 def test_explicit_environment_variables_pass_through_by_name(
     config: RuntimeConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

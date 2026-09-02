@@ -319,14 +319,23 @@ def generate_secret(length_bytes: int = 24) -> str:
     return secrets.token_urlsafe(length_bytes)
 
 
-def _compose_path_scalar(path: Path) -> str:
-    """Escape a host path for a single-quoted scalar in the compose file.
+def _compose_single_quoted_scalar(value: str) -> str:
+    """Escape any value substituted into a single-quoted scalar in the compose file.
 
     Two parsers see the value: YAML (embedded single quotes double inside a
     single-quoted scalar) and Docker Compose's own ``${VAR}`` interpolation,
     which runs even inside YAML quotes (``$`` doubles to ``$$``).
+
+    The one owner of that rule. Every ``%{...}`` slot the template wraps in
+    single quotes goes through here, because a value that escapes the scalar
+    becomes a sibling key in the generated infrastructure file.
     """
-    return str(path).replace("$", "$$").replace("'", "''")
+    return value.replace("$", "$$").replace("'", "''")
+
+
+def _compose_path_scalar(path: Path) -> str:
+    """Escape a host path for a single-quoted scalar in the compose file."""
+    return _compose_single_quoted_scalar(str(path))
 
 
 def _project_name(bundle_directory: Path) -> str:
@@ -447,8 +456,10 @@ def _render_compose(
             )
     if xcom_objectstorage_url is not None:
         # A multi-machine executor needs an XCom store every host reaches;
-        # the file:// defaults above are single-host by construction.
-        xcom_objectstorage_path = xcom_objectstorage_url
+        # the file:// defaults above are single-host by construction. The
+        # template slot is a single-quoted YAML scalar (see COMPOSE_TEMPLATE),
+        # so the value goes through the same escaping every other slot uses.
+        xcom_objectstorage_path = _compose_single_quoted_scalar(xcom_objectstorage_url)
     environment_passthrough = bucket_credentials_env + _environment_passthrough_lines(
         passthrough_environment_variables
     )
