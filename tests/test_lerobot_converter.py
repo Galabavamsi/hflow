@@ -427,8 +427,9 @@ def test_video_cache_distinguishes_file_indices_and_reuses_same_source(
     )
 
     published_uris: list[str] = []
+    receipts: list[prep._PublishedEpisode] = []
     for episode_index in (0, 1, 0):
-        uri = prep._convert_single_episode(
+        receipt = prep._convert_single_episode(
             source_archive=source_archive,
             dataset_source=dataset_source,
             storage=LocalStorageRoot(tmp_path / "output"),
@@ -437,10 +438,19 @@ def test_video_cache_distinguishes_file_indices_and_reuses_same_source(
             numeric_schemas=numeric_schemas,
             frames_per_second=30,
         )
-        published_uris.append(uri)
+        published_uris.append(receipt["uri"])
+        receipts.append(receipt)
 
     assert published_uris[0].endswith("landing/lerobot_episode_0001.mcap")
     assert published_uris[1].endswith("landing/lerobot_episode_0002.mcap")
+
+    # The manifest tests build their receipts in the convert stub, so this is
+    # the only place the real function's receipt is checked against the object
+    # it published rather than against a value the test wrote itself.
+    for receipt in receipts:
+        landed_path = Path(receipt["uri"])
+        assert receipt["content_id"] == prep.content_episode_id(landed_path)
+        assert receipt["size_bytes"] == landed_path.stat().st_size
 
     video_urls = [
         "https://huggingface.co/datasets/fake/repo/resolve/abc/videos/"
@@ -1074,13 +1084,18 @@ def _install_publish_through_convert(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         camera_keys: object,
         numeric_schemas: object,
         frames_per_second: object,
-    ) -> str:
+    ) -> prep._PublishedEpisode:
         del source_archive, dataset_source, camera_keys, numeric_schemas, frames_per_second
         relative_key = f"landing/lerobot_episode_{episode_index + 1:04d}.mcap"
         staged = tmp_path / f"staged-{episode_index}.mcap"
         staged.write_bytes(f"episode-{episode_index}".encode())
         published_keys.append(relative_key)
-        return storage.publish(staged, relative_key)
+        published_uri = storage.publish(staged, relative_key)
+        return {
+            "uri": published_uri,
+            "content_id": prep.content_episode_id(staged),
+            "size_bytes": staged.stat().st_size,
+        }
 
     monkeypatch.setattr(prep, "_convert_single_episode", fake_convert)
     return published_keys
@@ -1107,8 +1122,9 @@ def test_import_returns_local_uris_and_keeps_cache_beside_landing(
     assert Path(episode_uris[0]).is_file()
     assert (output_dir / "prepared-manifest.json").is_file()
     manifest_payload = json.loads((output_dir / "prepared-manifest.json").read_text())
+    landed_episode_path = output_dir / "landing" / "lerobot_episode_0001.mcap"
     assert manifest_payload == {
-        "schema_version": 2,
+        "schema_version": 3,
         "dataset": {
             "repo_id": "fake/repo",
             "revision": "abc",
@@ -1116,6 +1132,13 @@ def test_import_returns_local_uris_and_keeps_cache_beside_landing(
         },
         "camera_keys": [prep.DEFAULT_CAMERA_KEY],
         "episodes_converted": 1,
+        "episodes": [
+            {
+                "uri": episode_uris[0],
+                "content_id": prep.content_episode_id(landed_episode_path),
+                "size_bytes": landed_episode_path.stat().st_size,
+            }
+        ],
         "converter_version": prep.CONVERTER_VERSION,
     }
     assert (output_dir / "_lerobot_cache" / "abc").is_dir()
@@ -1186,7 +1209,7 @@ def test_converter_version_reaches_the_canonical_episode_provenance(
         lambda source_path, output_path, *args, **kwargs: shutil.copy(source_path, output_path),
     )
 
-    uri = prep._convert_single_episode(
+    receipt = prep._convert_single_episode(
         source_archive=source_archive,
         dataset_source=dataset_source,
         storage=LocalStorageRoot(tmp_path / "output"),
@@ -1196,7 +1219,7 @@ def test_converter_version_reaches_the_canonical_episode_provenance(
         frames_per_second=30,
     )
 
-    episode_metadata = open_reader(uri).metadata()
+    episode_metadata = open_reader(receipt["uri"]).metadata()
     assert episode_metadata["episode/v1"]["converter_version"] == prep.CONVERTER_VERSION
     assert episode_metadata["source-provenance/v1"]["converter_version"] == prep.CONVERTER_VERSION
 
@@ -1234,6 +1257,88 @@ def test_import_publishes_into_a_bucket_data_root_without_uploading_cache(
     ]
     assert not any(name.startswith("_lerobot_cache") for name in data_root.list_names())
     assert (data_root.mirror / "_lerobot_cache" / "abc").is_dir()
+
+
+def test_manifest_records_per_episode_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The manifest lists every delivered episode with its content id and size.
+
+    A recipient of a prepared corpus gets a receipt that can be checked
+    against the landing directory without re-running the import; the
+    content id is the same ``content_episode_id`` the catalog dedupes on.
+    """
+    output_dir = tmp_path / "out"
+    monkeypatch.setattr(
+        prep, "_hf_repo_info", lambda repo, revision: {"sha": "abc", "license": "apache-2.0"}
+    )
+    monkeypatch.setattr(prep, "_ensure_source_archive", _stub_single_episode_source_archive)
+    _install_publish_through_convert(monkeypatch, tmp_path)
+
+    episode_uris = prep.import_lerobot_dataset(
+        dataset_repo="fake/repo",
+        revision="main",
+        output_dir=output_dir,
+        episode_index=0,
+    )
+
+    manifest = json.loads((output_dir / "prepared-manifest.json").read_text())
+    assert manifest["schema_version"] == 3
+    # v2 top-level keys survive: readers of the old schema keep working.
+    assert manifest["episodes_converted"] == 1
+    assert manifest["dataset"] == {
+        "repo_id": "fake/repo",
+        "revision": "abc",
+        "license": "apache-2.0",
+    }
+    assert manifest["converter_version"] == prep.CONVERTER_VERSION
+    assert manifest["camera_keys"] == [prep.DEFAULT_CAMERA_KEY]
+
+    entries = manifest["episodes"]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["uri"] == episode_uris[0]
+    assert entry["size_bytes"] == len(b"episode-0")
+    assert entry["content_id"] == prep.content_episode_id(
+        output_dir / "landing" / "lerobot_episode_0001.mcap"
+    )
+    # The receipt describes the published landing object, not a local
+    # staging path: for a bucket root this entry is an object URI that a
+    # recipient of the bucket prefix can resolve without our filesystem.
+    assert entry["uri"].endswith("landing/lerobot_episode_0001.mcap")
+    assert "canonical-" not in entry["uri"]
+    assert "staged-" not in entry["uri"]
+
+
+def test_manifest_content_id_detects_a_truncated_episode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The #379 controlled result as a test: truncating one episode to zero
+    bytes is detectable from the delivery by re-hashing against the manifest."""
+    output_dir = tmp_path / "out"
+    monkeypatch.setattr(
+        prep, "_hf_repo_info", lambda repo, revision: {"sha": "abc", "license": "apache-2.0"}
+    )
+    monkeypatch.setattr(prep, "_ensure_source_archive", _stub_single_episode_source_archive)
+    _install_publish_through_convert(monkeypatch, tmp_path)
+
+    prep.import_lerobot_dataset(
+        dataset_repo="fake/repo",
+        revision="main",
+        output_dir=output_dir,
+        episode_index=0,
+    )
+
+    manifest = json.loads((output_dir / "prepared-manifest.json").read_text())
+    entry = manifest["episodes"][0]
+    episode_path = output_dir / "landing" / "lerobot_episode_0001.mcap"
+    original_size = episode_path.stat().st_size
+    assert original_size == entry["size_bytes"]
+    assert prep.content_episode_id(episode_path) == entry["content_id"]
+
+    episode_path.write_bytes(b"")
+    assert episode_path.stat().st_size != entry["size_bytes"]
+    assert prep.content_episode_id(episode_path) != entry["content_id"]
 
 
 def test_import_skips_bucket_manifest_when_an_episode_publish_fails(
