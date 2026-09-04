@@ -83,8 +83,7 @@ uv run --extra openai python examples/openai_vision/pipeline.py
 
 The example synthesizes a small episode when no MCAP path is provided and runs
 two contact-sheet checks through the Responses API: an activity description,
-and a hand-visibility fraction (missing or occluded hand positions, a quality
-issue Dyna's article describes, answered as model evidence). Each check is one
+and a hand-visibility fraction answered as model evidence. Each check is one
 API call;
 `OPENAI_BASE_URL` can point the same client at another endpoint that
 implements the Responses API.
