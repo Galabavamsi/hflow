@@ -1125,6 +1125,14 @@ def _install_publish_through_convert(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         {"info": {"is_depth_map": True}},
         {"info": {"video.is_depth_map": True}},
         {"video_info": {"video.is_depth_map": True}},
+        # LeRobot's own is_depth_map() is truthy, not an identity test, so a
+        # corpus marked with a string or an int is depth to LeRobot and must
+        # not be RGB to us. An `is True` check here would send exactly these
+        # down the H.264 path.
+        {"info": {"is_depth_map": "true"}},
+        {"info": {"is_depth_map": 1}},
+        {"info": {"video.is_depth_map": "yes"}},
+        {"video_info": {"video.is_depth_map": 1}},
     ],
 )
 def test_import_refuses_a_depth_video_before_publishing_dataset_output(

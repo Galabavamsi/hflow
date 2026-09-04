@@ -603,19 +603,35 @@ class _NumericSchema:
 
 
 def _is_depth_map_feature(feature_specification: object) -> bool:
+    """Whether LeRobot marks this feature as depth, by its own definition.
+
+    Deliberately truthy rather than ``is True``, matching LeRobot's own
+    ``is_depth_map()`` in ``lerobot/configs/video.py``, which returns
+    ``bool(info.get("is_depth_map") or ...)``. Anything LeRobot calls depth
+    must be refused here; a stricter test would let a corpus carrying
+    ``"is_depth_map": "true"`` or ``1`` through the RGB path, which is the
+    outcome the refusal exists to prevent.
+
+    Canonically ``feature["info"]["is_depth_map"]``, with the legacy
+    ``video.is_depth_map`` spelling in either ``info`` or a separate
+    ``video_info`` dict.
+    """
     if not isinstance(feature_specification, dict):
         return False
     feature_information = feature_specification.get("info")
     legacy_video_information = feature_specification.get("video_info")
-    return (
-        isinstance(feature_information, dict)
-        and (
-            feature_information.get("is_depth_map") is True
-            or feature_information.get("video.is_depth_map") is True
+    return bool(
+        (
+            isinstance(feature_information, dict)
+            and (
+                feature_information.get("is_depth_map")
+                or feature_information.get("video.is_depth_map")
+            )
         )
-    ) or (
-        isinstance(legacy_video_information, dict)
-        and legacy_video_information.get("video.is_depth_map") is True
+        or (
+            isinstance(legacy_video_information, dict)
+            and legacy_video_information.get("video.is_depth_map")
+        )
     )
 
 
