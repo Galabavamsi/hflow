@@ -157,10 +157,11 @@ Observations:
 
 ## Reads: chunk fetches and throughput by chunk layout (issue #27)
 
-Default MCAP writing gives each topic its own chunks, so one training sample
-costs a read per topic. HFlow's writer instead lays out topic *groups*
-time-major (cameras in one chunk stream, proprioception+actions in another),
-so a sample costs one read per group.
+The stock MCAP writer interleaves every topic into every chunk, so a read of
+one topic pulls every topic's bytes. Per-topic chunking avoids that but costs a
+training sample one read per topic. HFlow's writer instead lays out topic
+*groups* time-major (cameras in one chunk stream, proprioception+actions in
+another), so a sample costs one read per group.
 
 **Measured**: three layouts holding identical messages (60 s episode,
 4 cameras @ 15 Hz + `/joint_states` @ 100 Hz, 800 KB chunks, same stock
