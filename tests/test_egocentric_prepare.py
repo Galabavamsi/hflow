@@ -21,6 +21,8 @@ from hflow import Episode, TransformConfig, write_canonical_episode
 from hflow.checks import camera_frame_stats
 from hflow.ffmpeg import ffmpeg_path
 
+pytestmark = pytest.mark.requires_system_ffmpeg
+
 
 def _load_egocentric_example_module(file_name: str, module_name: str) -> ModuleType:
     module_path = Path(__file__).parents[1] / "examples" / "egocentric" / file_name
