@@ -680,6 +680,7 @@ def test_single_frame_packet_and_container_duration_is_one_second(
         assert _decoded_yuv(path).shape[0] == 1
 
 
+@pytest.mark.requires_system_ffmpeg
 def test_model_frames_match_canonical_episode_at_selected_indices(
     source_video: Path, tmp_path: Path
 ) -> None:

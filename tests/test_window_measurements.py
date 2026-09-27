@@ -98,6 +98,7 @@ def write_uncompressed_window(source: Path, output: Path) -> Path:
     return output
 
 
+@pytest.mark.requires_system_ffmpeg
 @pytest.mark.parametrize("display_rotation_degrees", [None, 90], ids=["upright", "rotated"])
 def test_shared_decode_equals_file_measurements_of_the_same_frames(
     tmp_path: Path, display_rotation_degrees: int | None

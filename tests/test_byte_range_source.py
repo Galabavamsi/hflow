@@ -20,6 +20,9 @@ from hflow.ffmpeg import ffmpeg_path, ffprobe_path
 from hflow.media import VideoProperties, probe_video
 from hflow.source_sampling import SourceFrameResize
 
+# Every test here extracts frames with -fps_mode, which FFmpeg added in 5.1.
+pytestmark = pytest.mark.requires_system_ffmpeg
+
 
 class FileRangeReader:
     """Reads one local file by range and counts the bytes it returned."""
