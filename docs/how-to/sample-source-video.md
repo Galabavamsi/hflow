@@ -1,7 +1,9 @@
 # Sample original video frames with complete window coverage
 
-Use this when a worker needs bounded previews of an original local video before
-importing it into a canonical episode. The
+Use this when a worker needs bounded previews of an original video before
+importing it into a canonical episode. The video can be a local file or, through
+a byte-range reader, an object in storage that is never downloaded in full (see
+[Sample a video in object storage](#sample-a-video-in-object-storage)). The
 [runnable example](../../examples/sample_source_video.py) probes the original
 duration, plans complete windows, writes JPEGs, and prints one JSON record per
 window with source timestamps and any keyframe fallback reason. To send each
@@ -51,7 +53,7 @@ Pass a `SourceFrameSampling` configuration to `hflow.sample_source_frames`:
 | Mode | Selection |
 | --- | --- |
 | `UNIFORM` | First original frame in each temporal bin. Bin length is the greater of `minimum_interval_millis` (default 1,000) and window duration divided by `maximum_frames` (default 16). |
-| `KEYFRAMES` | First encoded keyframe in each of `maximum_frames` equal temporal bins. |
+| `KEYFRAMES` | First encoded keyframe in each of `maximum_frames` equal temporal bins. The sampler seeks to each bin, so it reads only the bytes near the selected keyframes. |
 | `KEYFRAMES_FIRST` | Try keyframes; fall back to uniform if fewer than two were selected or their timestamp span covers less than half the window. |
 
 Bins start at the window boundary. The sampler probes the source time base and
@@ -89,6 +91,62 @@ to the surrounding worker.
 failed extraction removes its new output directory; completed earlier windows
 in the example remain available. The caller owns successful local output and its
 cleanup. These files do not establish resumable or durable run state.
+
+## Sample a video in object storage
+
+Wrap one pinned object version in `hflow.sources.PinnedSourceRangeReader`, which
+takes an obstore store and a `SourceExpectation` with the revision and size. It
+refuses an expectation that carries a SHA-256, because byte ranges cannot verify
+a whole-object digest. Then pass the source that `hflow.serve_byte_ranges` yields to
+`hflow.media.probe_video` and `hflow.sample_source_frames` in place of a path:
+
+```python
+import hflow
+from hflow.media import probe_video
+from hflow.sources import PinnedSourceRangeReader, SourceExpectation, SourceRevision
+
+reader = PinnedSourceRangeReader(
+    object_store,
+    SourceExpectation(SourceRevision(object_key, object_version), size_bytes=object_size),
+)
+with hflow.serve_byte_ranges(reader) as source:
+    duration_millis = probe_video(source).duration_millis
+    samples = hflow.sample_source_frames(
+        source,
+        output_directory,
+        window=hflow.SourceWindow(0, duration_millis),
+        settings=hflow.SourceFrameSampling(
+            mode=hflow.SourceSamplingMode.KEYFRAMES,
+            maximum_frames=3,
+            maximum_window_millis=duration_millis,
+        ),
+    )
+    fetched_bytes = source.bytes_fetched
+```
+
+Any object with a `size_bytes` property and a `read_range(start, stop)` method
+that returns exactly `stop - start` bytes or raises also works (see
+`hflow.ByteRangeReader`). `PinnedSourceRangeReader` re-checks the revision, path,
+and size on every range, so a replaced object fails with `SourceReadError`.
+
+`serve_byte_ranges` runs a server on 127.0.0.1 with a random path until the
+`with` block exits. FFmpeg and ffprobe read the object through it, so a probe or
+sample returns the same result as it would for a local copy of the same bytes.
+The server fetches 256 KiB blocks only as FFmpeg reads them and caches them for
+the block, because every FFmpeg run re-reads the container header. HTTP proxy
+environment variables are removed for these runs. Credentials and object
+versions stay in your reader and never appear in FFmpeg's arguments. The URL
+does: while the block runs, any local process that can read FFmpeg's command
+line can read the object's bytes. Use it on hosts that do not run untrusted
+local users. Leaving the block waits for any read still in progress.
+
+What is read depends on the mode. `KEYFRAMES` reads the container header and
+the bytes from each bin start to its first keyframe. `UNIFORM`,
+`NEAREST_KEYFRAMES`, and a `KEYFRAMES_FIRST` fallback read the whole window.
+
+If your reader raises, the consuming call re-raises that exception, not
+`UnreadableVideo` or `SourceSamplingError`, so a storage or credential failure
+is never recorded as unreadable media.
 
 ## Include sampling in check identity
 
