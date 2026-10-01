@@ -43,3 +43,11 @@ jobs:
       - name: Tests
         # Public ubuntu-latest runners have four CPUs; keep media-heavy tests within that limit.
         run: uv run pytest -q -n 4
+      - name: Install minimum supported NumPy
+        if: matrix.python-version == '3.14'
+        run: uv pip install "numpy==2.3.5"
+      - name: Test minimum NumPy compatibility
+        if: matrix.python-version == '3.14'
+        run: >-
+          uv run --no-sync pytest -q -n 4
+          tests/test_resample_derive.py tests/test_episode_to_arrow.py tests/test_video_import.py
