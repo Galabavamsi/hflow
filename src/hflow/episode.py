@@ -157,29 +157,36 @@ def _is_empty_sequence(value: Any) -> bool:
     return isinstance(value, (list, tuple)) and len(value) == 0
 
 
-def _arrow_field_names(messages: Sequence[Any]) -> list[str]:
-    """Field names in first-seen order, across every message.
+def _arrow_field_values(messages: Sequence[Any]) -> dict[str, list[Any]]:
+    """Field values in first-seen order, collected in one pass.
 
-    Protobuf and CDR messages expose one schema, so the first message is
-    enough. JSON objects do not: a key can be absent until a later sample.
+    JSON objects can introduce keys at any point, so names must be collected
+    across every message. Values are gathered in the same walk so skipping a
+    nested-only or all-null field does not rescan the channel per key. Every
+    value list ends with one slot per message: a key introduced mid-stream is
+    backfilled with nulls for the earlier rows, and a message that omits a
+    known key appends null in its position.
     """
-    names: list[str] = []
-    seen: set[str] = set()
-    for message in messages:
-        for name in _message_field_names(message):
-            if name not in seen:
-                seen.add(name)
-                names.append(name)
-    return names
-
-
-def _message_field_or_absent(message: Any, name: str) -> Any:
-    if isinstance(message, dict):
-        return message.get(name)
-    try:
-        return getattr(message, name)
-    except AttributeError:
-        return None
+    values_by_name: dict[str, list[Any]] = {}
+    for row_count, message in enumerate(messages, start=1):
+        items: Iterator[tuple[str, Any]]
+        if isinstance(message, dict):
+            items = iter(message.items())
+        else:
+            items = (
+                (name, _message_field(message, name)) for name in _message_field_names(message)
+            )
+        for name, value in items:
+            values = values_by_name.get(name)
+            if values is None:
+                values_by_name[name] = [None] * (row_count - 1) + [value]
+            else:
+                values.append(value)
+        # A message that omits a key still occupies a row in that column.
+        for values in values_by_name.values():
+            while len(values) < row_count:
+                values.append(None)
+    return values_by_name
 
 
 def _arrow_column_values(topic: str, field_name: str, values: Sequence[Any]) -> list[Any] | None:
@@ -194,7 +201,6 @@ def _arrow_column_values(topic: str, field_name: str, values: Sequence[Any]) -> 
     """
     saw_scalar = False
     saw_list = False
-    saw_empty = False
     saw_nested = False
     for value in values:
         if value is None:
@@ -202,18 +208,21 @@ def _arrow_column_values(topic: str, field_name: str, values: Sequence[Any]) -> 
         if _is_arrow_scalar(value):
             saw_scalar = True
         elif _is_numeric_sequence(value) or (
-            isinstance(value, np.ndarray) and value.size == 0 and value.dtype.kind in "iuf"
+            isinstance(value, np.ndarray) and value.dtype.kind in "iuf"
         ):
+            # An empty numeric array keeps its dtype, so it types the column.
             saw_list = True
         elif _is_empty_sequence(value):
-            saw_empty = True
+            # `[]` carries no element type; an empty numeric ndarray above
+            # does. Keep the slot null unless a typed sample arrives.
+            saw_nested = saw_nested
         else:
             saw_nested = True
-    if saw_nested and (saw_scalar or saw_list or saw_empty):
+    if saw_nested and (saw_scalar or saw_list):
         raise ValueError(
             f"field {field_name!r} of topic {topic!r} mixes nested values with primitive values"
         )
-    if saw_scalar and (saw_list or saw_empty):
+    if saw_scalar and saw_list:
         raise ValueError(f"field {field_name!r} of topic {topic!r} mixes scalar and list values")
     if saw_nested or not (saw_scalar or saw_list):
         return None
@@ -384,23 +393,19 @@ class ChannelData:
         }
         if not self._raw:
             return pyarrow.table(columns)
-        # JSON objects omit keys, and the first sample of a field may be null
-        # or an empty list. Typing the column from message 0 drops every later
-        # value (#656).
-        for name in _arrow_field_names(self.messages):
-            values = _arrow_column_values(
-                self.topic,
-                name,
-                [_message_field_or_absent(message, name) for message in self.messages],
-            )
-            if values is None:
+        # JSON objects can carry a key on any message, and the first sample of
+        # a field may be null, empty, or nested. Typing the column from message
+        # 0 drops every later value (#656).
+        for name, values in _arrow_field_values(self.messages).items():
+            normalized_values = _arrow_column_values(self.topic, name, values)
+            if normalized_values is None:
                 continue
             if name in columns:
                 raise ValueError(
                     f"field {name!r} of topic {self.topic!r} conflicts with "
                     f"reserved Arrow column {name!r}"
                 )
-            columns[name] = pyarrow.array(values)
+            columns[name] = pyarrow.array(normalized_values)
         return pyarrow.table(columns)
 
 

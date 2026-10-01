@@ -1,6 +1,8 @@
 """Regression tests for ChannelData.to_arrow."""
 
 import json
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import pytest
@@ -14,7 +16,7 @@ def _json_channel(
     messages: list[dict[str, object]],
     *,
     log_times: list[int] | None = None,
-    decoder: object | None = None,
+    decoder: Callable[[bytes], Any] | None = None,
 ) -> ChannelData:
     raw_payloads = [json.dumps(message).encode() for message in messages]
     info = TopicInfo(
@@ -106,6 +108,33 @@ def test_to_arrow_skips_nested_fields_and_untyped_nulls() -> None:
     )
 
     assert channel.to_arrow().column_names == ["log_time_ns"]
+
+
+def test_to_arrow_skips_a_field_that_starts_empty_then_turns_nested() -> None:
+    pytest.importorskip("pyarrow")
+    # An empty list carries no element type; a later list of objects stays
+    # nested. The field is skipped for the whole channel, not an error.
+    channel = _json_channel("/state", [{"items": []}, {"items": [{"a": 1}]}])
+
+    assert channel.to_arrow().column_names == ["log_time_ns"]
+
+
+def test_to_arrow_keeps_an_empty_numeric_array_before_typed_samples() -> None:
+    pytest.importorskip("pyarrow")
+
+    def decode(payload: bytes) -> dict[str, object]:
+        decoded = json.loads(payload.decode())
+        if decoded["pos"] == "empty":
+            decoded["pos"] = np.array([], dtype=np.float64)
+        return decoded
+
+    channel = _json_channel(
+        "/state",
+        [{"pos": "empty"}, {"pos": [1.0, 2.0]}],
+        decoder=decode,
+    )
+
+    assert channel.to_arrow().to_pydict()["pos"] == [[], [1.0, 2.0]]
 
 
 def test_to_arrow_rejects_a_field_that_mixes_primitives_and_nested_values() -> None:
