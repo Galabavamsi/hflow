@@ -215,7 +215,7 @@ def _arrow_column_values(topic: str, field_name: str, values: Sequence[Any]) -> 
         elif _is_empty_sequence(value):
             # `[]` carries no element type; an empty numeric ndarray above
             # does. Keep the slot null unless a typed sample arrives.
-            saw_nested = saw_nested
+            continue
         else:
             saw_nested = True
     if saw_nested and (saw_scalar or saw_list):
